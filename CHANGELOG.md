@@ -990,3 +990,369 @@ existing table-skeleton pulse from Phase B.
   badge on the Customer Detail page -- no `Call` table exists, per
   instruction not to create unnecessary future tables.
 - Not pushed to GitHub, no Vercel project connected yet.
+
+---
+
+## 2026-08-08 — V1 backend: auth, agents, calls, recordings, transcripts, AI summaries, follow-ups + Android integration prep
+
+User authorized working autonomously through all remaining phases without
+stopping for approval between them. This single entry covers the full
+pass: database, backend API, CRM UI wiring, documentation, and Android
+integration prep -- in that order, each verified before moving to the
+next.
+
+### Database (Prisma migrations, applied to the real Neon database)
+
+**Two new migrations**, both additive/non-destructive, both applied via
+`prisma migrate dev` (not hand-authored SQL this time -- a real connection
+now exists) and confirmed with `prisma migrate status`:
+
+- `20260808153513_add_agents_calls_recordings_transcripts_summaries_actions`
+  -- adds `Agent`, `Call`, `Recording`, `Transcript`, `AiSummary`, `Action`
+  tables, plus a new nullable `assigned_agent_id` FK column on the
+  existing `customers` table. **Existing `customers` rows/columns
+  untouched** -- confirmed by reading the generated migration SQL before
+  running anything: it's all `CREATE TYPE`/`CREATE TABLE`/one `ALTER TABLE
+  ... ADD COLUMN` (nullable)/`CREATE INDEX`/`ADD CONSTRAINT`, no `DROP` or
+  destructive `ALTER` anywhere.
+- `20260808155147_calls_status_nullable_until_finish` -- changed
+  `Call.status` from required to nullable *before* any `Call` row existed
+  (caught during schema authoring, fixed before running `migrate dev`),
+  so the outcome (answered/missed/etc.) can be unknown between "start
+  call" and "finish call" -- matches the two-step lifecycle the API
+  exposes.
+
+A real customer row created by the user directly through the CRM UI
+(`name: "dff"`) was present in the database throughout this entire pass
+and was **never touched, queried destructively, or deleted** -- confirmed
+present at both the start and the end of this session's testing.
+
+**`prisma/seed.ts`** -- new. Creates exactly one dev-only admin `Agent`
+account, idempotent (`findUnique` + conditional `create`, not `upsert()` --
+see the WebSocket finding below). Credentials are documented in the file
+itself (clearly labeled dev-only, not a real secret) and were never
+printed to any log/output in this session -- only referenced by "see the
+file."
+
+**Schema summary (all six new models):** `Agent` (auth identity + role +
+active flag), `Call` (belongs to `Customer` via `customerId`, optionally
+to `Agent` via `agentId`, `status` nullable until finished), `Recording`
+(1:1 with `Call`, metadata only -- see Storage below), `Transcript` (1:1
+with `Call`), `AiSummary` (1:1 with `Call`, structure only -- see AI
+Summaries below), `Action` (follow-ups, belongs to `Customer`, optionally
+to `Call` and an `Agent`). Indexes added on every foreign key plus
+`customers.status`, `calls.started_at`, `actions.status` (see
+`prisma/schema.prisma` for the full field list -- not repeated here,
+`API_DOCUMENTATION.md` documents the API shape these back).
+
+### A real, environment-specific bug found and fixed: Prisma + WebSocket on Node 20
+
+**`prisma/seed.ts` failed** with "All attempts to open a WebSocket to
+connect to the database failed" on its very first run -- even for a plain
+`findUnique`, not just a transaction. Root cause, confirmed not assumed:
+`@neondatabase/serverless`'s `Pool` (which `@prisma/adapter-neon` uses
+internally) needs a WebSocket implementation, and Node.js only ships a
+*global* `WebSocket` starting at v22 -- this project targets Node 20
+(`package.json` "engines"). It had been silently working inside `next
+dev`/`next start` because Next's bundler polyfills this for code it
+bundles; a plain `tsx prisma/seed.ts` process outside that bundler has no
+such polyfill. **Fixed for real, not just for the seed script:**
+`neonConfig.webSocketConstructor = <ws package>` added to both
+`prisma/seed.ts` and, more importantly, `lib/db/prisma.ts` itself (the
+app's actual Prisma client) -- the app was working by accident of the
+bundler, this makes it work by explicit, correct configuration instead,
+which matters for anything that ever runs this code outside `next dev`/
+`next start` (e.g. a future standalone script or a different deploy
+target). Added the `ws` package (+ `@types/ws`) as a dependency --
+justified: it's the fix for a confirmed real bug, not speculative.
+
+**Separately confirmed:** this environment's Neon connection cannot open
+the WebSocket session Prisma's *interactive transactions* need either
+(`upsert()`, `$transaction([...])` both fail the same way, confirmed by
+testing `upsert()` first before switching to `findUnique`+`create`).
+Every new service (`lib/customers/prisma-store.ts` already did this;
+`lib/calls/service.ts`, `lib/recordings/service.ts`,
+`lib/transcripts/service.ts`, `lib/ai-summaries/service.ts`) uses plain
+sequential queries instead of `upsert()`, documented inline everywhere it
+matters. Now a standing rule -- `CLAUDE.md` §3.11.
+
+### Authentication (Phase 1)
+
+**Files created:** `lib/auth/password.ts` (bcryptjs, cost factor 12),
+`lib/auth/jwt.ts` (HS256 via `jose`, not `jsonwebtoken` -- `jose` runs on
+Web Crypto and works in both the Node API-route runtime and the Edge
+`proxy.ts` runtime with the same code; `jsonwebtoken` needs Node's
+`crypto`, unavailable in Edge middleware), `lib/auth/session.ts`
+(`requireAuth`/`requireRole` helpers, reads either the `crm_session`
+httpOnly cookie or an `Authorization: Bearer` header -- one mechanism for
+both the CRM web app and Android, per `CRM_ARCHITECTURE.md` §8),
+`lib/auth/validation.ts`, `lib/agents/types.ts` + `service.ts` (agent
+CRUD, `authenticateAgent()` -- generic "invalid email or password" error,
+deliberately doesn't distinguish wrong-email/wrong-password/inactive-
+account), `app/api/auth/login/route.ts` (issues the JWT, sets it as an
+httpOnly cookie *and* returns it in the JSON body for bearer clients),
+`app/api/auth/logout/route.ts`, `app/api/auth/me/route.ts`,
+`app/api/agents/route.ts` + `[id]/route.ts` (admin-only create/update,
+`GET` open to any authenticated agent for the "assigned agent" picker),
+`proxy.ts` (see rename note below) protecting every CRM page,
+`app/login/page.tsx` + `components/crm/LoginForm.tsx`, a new `(app)`
+route group (`app/(app)/layout.tsx` renders the Sidebar shell; `/login`
+sits outside it and is chrome-free), `components/crm/LogoutButton.tsx`.
+
+**`JWT_SECRET` generated locally** (48 random bytes, base64) and written
+directly into `.env` via a script that never printed the value to this
+session's output -- confirmed by re-reading the transcript-equivalent
+command output, only a success message was shown.
+
+**Files created (seed):** `prisma/seed.ts`, registered via
+`migrations.seed` in `prisma.config.ts`.
+
+**`middleware.ts` renamed to `proxy.ts`, function renamed `middleware` →
+`proxy`** -- Next.js 16 deprecated the old convention (`next build` warned
+about it); found and applied the exact codemod's transform (`file → proxy.ts`,
+function → `proxy`) manually since the codemod itself refused to run
+against uncommitted changes and `--force`-running an unreviewed canary
+codemod over this much uncommitted work wasn't worth the risk. Verified
+by re-running `next build` and confirming the deprecation warning is
+gone.
+
+### Customers (Phase 2 — extended)
+
+**Files modified:** `lib/customers/types.ts` (added `assignedAgentId`,
+`ListCustomersParams`/`ListCustomersResult` for pagination),
+`lib/customers/prisma-store.ts` (real search via Postgres `ILIKE`
+(`contains`, `mode: "insensitive"`) across name/phone/location/agent,
+status filter, pagination with a real `count()`, and
+`resolveAgentName()` -- denormalizes the assigned agent's current name
+into `Customer.assignedAgent` on every write that touches
+`assignedAgentId`, so existing display code didn't need to change),
+`lib/customers/validation.ts` (`assignedAgent` free-text field replaced
+with `assignedAgentId`), `app/api/customers/route.ts` +
+`[id]/route.ts` (added `requireAuth`, `GET` now takes `q`/`status`/
+`assignedAgentId`/`page`/`pageSize`), new `app/api/customers/lookup/route.ts`
+(phone-number lookup -- Android's "identify the customer" step).
+
+### Agents (Phase 3)
+
+Covered above under Authentication (the `Agent` model and its CRUD API are
+one and the same as the auth identity, per the architecture's original
+design -- "one identity, not two").
+
+### Calls (Phase 4)
+
+**Files created:** `lib/calls/types.ts`, `lib/calls/validation.ts`,
+`lib/calls/service.ts` (`startCall`/`updateCall`/`getCallById`/
+`listCallsForCustomer`/`getCallStatsForCustomer`, joins `agent`/
+`recording`/`transcript`/`aiSummary` for the UI's benefit),
+`app/api/calls/route.ts` (`POST` -- start), `app/api/calls/[id]/route.ts`
+(`GET`, `PATCH` -- finish), `app/api/customers/[id]/calls/route.ts`
+(history + stats together). Two-step lifecycle confirmed working exactly
+as designed in live testing (see Testing below): `POST` returns `status:
+null`, `PATCH` sets the real outcome.
+
+**A Prisma-7 API-compatibility bug found and fixed:** `Prisma.validator`
+(used in the first draft of `lib/calls/service.ts` and
+`lib/actions/service.ts` to type a reusable `include` shape) doesn't
+exist in Prisma 7's generated client -- caught by `next build`'s
+TypeScript pass, not silently ignored. Fixed with the modern equivalent:
+`{ include: {...} } satisfies CallDefaultArgs` + `CallGetPayload<typeof
+...>`, both types imported directly from the generated client's
+`models` barrel.
+
+### Recordings (Phase 5 — metadata only, explicitly marked pending)
+
+**Files created:** `lib/storage/index.ts` -- the object-storage
+abstraction interface, explicitly returning `{ name: "pending", configured:
+false }`. No cloud storage credentials exist; this is stated plainly, not
+implied to work. `lib/recordings/types.ts` + `service.ts`,
+`app/api/calls/[id]/recording/route.ts` (`GET`/`POST`, registers metadata
+only -- `storageKey`/`mimeType`/`sizeBytes`/`durationSeconds` -- never
+receives or stores audio bytes).
+
+### Transcripts (Phase 6)
+
+**Files created:** `lib/transcripts/types.ts` + `service.ts`,
+`app/api/calls/[id]/transcript/route.ts`. Submitting non-empty `text`
+with no explicit `processingStatus` implies `DONE`.
+
+### AI summaries (Phase 7 — structure only, nothing fabricated)
+
+**Files created:** `lib/ai-summaries/types.ts` + `service.ts`,
+`app/api/calls/[id]/summary/route.ts`. `GET` on a call with nothing
+submitted returns `{ "data": null, "processingStatus": "PENDING" }` --
+verified live (see Testing) that this is genuinely what comes back before
+anything is submitted, not a fabricated-looking placeholder.
+
+### Follow-up / actions (Phase 8)
+
+**Files created:** `lib/actions/types.ts` + `validation.ts` + `service.ts`
+(deliberately flat, no workflow engine -- `type` ∈ `FOLLOW_UP`/
+`REACH_OUT`/`CALLBACK`/`OTHER`, `status` ∈ `PENDING`/`IN_PROGRESS`/
+`COMPLETED`/`CANCELLED`, `COMPLETED` auto-stamps `completedAt`),
+`app/api/customers/[id]/actions/route.ts`, `app/api/actions/[id]/route.ts`.
+
+### CRM UI (Phase 9 — wired to the real backend, mock removed)
+
+**Files deleted:** `lib/mock-data/calls.ts` -- the entire module, per
+explicit instruction to remove the fake call-history implementation now
+that real Call APIs exist. `components/crm/DemoDataBadge.tsx` -- its only
+call sites were the now-real customers list/detail sections; deleted
+rather than left as dead code.
+
+**Files rewritten:** `app/(app)/customers/page.tsx` (now reads real
+`page`/`q`/`status` from the URL's search params and calls
+`listCustomers()` with them -- search/filter/pagination are real,
+server-side, not client-side filtering over one page's data, which would
+silently miss matches on other pages), `components/crm/CustomersExplorer.tsx`
+(debounced URL-driven search, a status-filter `<select>`, Previous/Next
+pagination controls), `app/(app)/customers/[id]/page.tsx` (calls
+`lib/calls/service.ts` + `lib/actions/service.ts` instead of the deleted
+mock module), `components/crm/CallHistoryTable.tsx` (recording/
+transcript/AI-summary columns now show real `processingStatus`-derived
+badges, never the previous mock version's fabricated transcript sentence
+displayed as if it were real call content), `components/crm/CustomerForm.tsx`
+(`assignedAgent` free-text field replaced with a real `<select>` over
+actual `Agent` records).
+
+**Files created:** `components/crm/FollowUpList.tsx` (+ `.module.css`,
+`lib/api-client/actions.ts`) -- add/complete follow-ups from the Customer
+Detail page, `app/(app)/agents/page.tsx` (admin-only -- checks
+`role === "ADMIN"` itself via the session cookie and redirects otherwise,
+since `proxy.ts` only checks "authenticated," not role) +
+`components/crm/AgentsTable.tsx` (+ `.module.css`, `lib/api-client/agents.ts`)
+-- list agents, add one, toggle active/inactive. `components/crm/Sidebar.tsx`
+rewritten as a Client Component (`usePathname()`) so "Agents" (admin-only,
+conditionally rendered) and "Customers" highlight correctly as two real
+nav items instead of one permanently-styled-active link.
+
+### Documentation
+
+**Files created:** `API_DOCUMENTATION.md` (every endpoint, real
+request/response examples, error format, auth model -- all copied from
+what was actually tested below, not planned), `ANDROID_API_INTEGRATION.md`
+(see Android section).
+
+**Files modified:** `CLAUDE.md` (added a "Current status" section, three
+new standing rules -- never print secrets, the WebSocket/transaction
+limitation, every API route self-protects), `CRM_ARCHITECTURE.md` (status
+line updated from "proposal" to "implemented and tested," §14 open
+decisions marked resolved where they now are).
+
+### Testing (all against the real Neon database, via live HTTP requests)
+
+- `npm run lint` -- clean at every checkpoint.
+- `npm run build` -- clean at every checkpoint; final route list: 23
+  routes (`/login`, `/customers`, `/customers/new`, `/customers/[id]`,
+  `/agents`, plus every `/api/*` endpoint above), all correctly `ƒ`
+  (dynamic) except the static shell pages.
+- `npx prisma validate` / `npx prisma migrate status` -- clean at every
+  checkpoint.
+- **Full authenticated end-to-end lifecycle**, exercised via `curl` with a
+  real bearer token (i.e. exactly what Android would send), against the
+  live database:
+  1. Unauthenticated `/customers` → 307 to `/login`; unauthenticated
+     `/api/customers` → 401. Wrong password → 401.
+  2. Login as the seeded dev admin → 200, real JWT returned. Confirmed
+     the *same* token works via both the cookie (`GET /api/auth/me`
+     with `-b`) and the `Authorization: Bearer` header (`-H`) --
+     identical response both ways.
+  3. `GET /api/customers/lookup?phoneNumber=...` → 404 (customer doesn't
+     exist yet) → `POST /api/customers` (create) → `GET .../lookup` again
+     → 200, same id. This is Android's real "identify or create" flow,
+     run for real.
+  4. `POST /api/calls` (start) → `status: null` confirmed. `PATCH
+     /api/calls/{id}` (finish, `status: "ANSWERED"`, `durationSeconds:
+     142`) → confirmed persisted.
+  5. `POST /api/calls/{id}/recording` (metadata) → 201.
+  6. `POST /api/calls/{id}/transcript` → 201, `processingStatus: "DONE"`.
+  7. `GET /api/calls/{id}/summary` **before** submitting anything →
+     `{ "data": null, "processingStatus": "PENDING" }` -- confirmed the
+     "never fabricate" rule holds at the API level, not just in
+     intent.
+  8. `POST /api/calls/{id}/summary` → 201, real fields stored.
+  9. `GET /customers/{id}` (the actual CRM page, with the session cookie)
+     → confirmed the rendered HTML contains the real call ("Answered",
+     "Outgoing", "2:22" -- 142 seconds correctly formatted), and the AI
+     Summary column shows "Available" (not "Not available yet") now that
+     one exists.
+  10. Created a follow-up `Action` tied to that call, marked it
+      `COMPLETED`, confirmed `completedAt` was stamped.
+  11. **Killed the dev server completely** (`kill`, confirmed port 3000
+      free), **started it fresh**, and re-fetched the customer, the call
+      (status/recording/transcript/summary flags), the summary's actual
+      text, and the action's status via the *same* bearer token from
+      before the restart -- **everything matched exactly.** This is the
+      real proof of persistence (an in-memory implementation would have
+      reset to empty on this restart; it didn't) and that the JWT itself
+      remains valid across a restart (expected for stateless tokens, but
+      confirmed rather than assumed).
+  12. Cleaned up: deleted the test customer via `prisma db execute`
+      (cascade deletes removed the call/recording/transcript/summary/
+      action with it, confirmed via 404s afterward), confirmed the
+      database was back to exactly its real baseline (the user's own
+      `"dff"` customer, count 1) -- no test data left behind.
+  - Search/filter/pagination were additionally exercised directly against
+    the running server (`?q=`, `?status=`, `?page=`) beyond the single
+    "E2E Test Customer" created for the lifecycle test above.
+- **Not run:** interactive/visual browser testing (clicking through the
+  Agents page's add-agent form, the FollowUpList's add form) -- verified
+  via rendered HTML content and the underlying APIs those forms call, same
+  honest limitation noted in the prior UI-redesign entry.
+
+### Android integration (Phase 11-12)
+
+See `ANDROID_API_INTEGRATION.md` for the full record. Summary: inspected
+`ConbunCall_V4` read-only, added a new `data/backend/` package (DTOs,
+Retrofit service, client, repository) matching this backend's real,
+tested contract -- deliberately not merged into the existing `data/crm/`
+package, which models a different, never-built backend. Wired into
+`AppContainer` (one line) and a new "Sign in to CRM backend" button in
+Settings (the only UI call site added -- reuses the existing "API Base
+URL"/"CRM Auth Token" fields rather than adding parallel ones). **Verified
+with a real compile**, not just review: `JAVA_HOME=/snap/android-studio/236/jbr
+./gradlew :app:compileDebugKotlin --offline` → **BUILD SUCCESSFUL**, zero
+new warnings.
+
+**Blocker, identified precisely, not worked around:** this environment has
+the Android SDK and `adb` installed, but `adb devices` returns empty and
+no AVD is configured -- there is no device or emulator to run the app on.
+The exact next action is documented in `ANDROID_API_INTEGRATION.md`
+("Exact next action to run a real device test"): get a device/AVD, point
+Settings → API Base URL at this backend's LAN-reachable address (or a
+future Vercel URL), use the new Sign In fields with the seeded dev admin
+credentials.
+
+### What is real vs. mocked (end of this pass)
+
+**Real, backed by the live database, verified end-to-end:** authentication,
+agents, customers (including search/filter/pagination), calls (full
+start/finish lifecycle), recording metadata, transcripts, AI-summary
+structure, follow-up actions.
+
+**Explicitly not real, and never presented as real:** recording *audio
+bytes* (no object storage provider configured -- `lib/storage/index.ts`
+says so plainly), AI-generated summary *content* (this backend generates
+none; `POST .../summary` only stores what it's given, by a future real AI
+pipeline), any Android-side call to any endpoint beyond login (implemented
+and backend-verified, but not exercised from an actual device).
+
+### Incomplete / still requiring the next phase
+
+- No on-device/emulator test of the new Android code (see Android section
+  above) -- the single largest outstanding item.
+- `lookupCustomerByPhone`/`startCall`/`finishCall`/`registerRecording`/
+  `submitTranscript`/`submitAiSummary` have no Android UI call site beyond
+  the new Sign In button -- wiring them into the real call-completion flow
+  is a separate, smaller follow-up task.
+- No object storage provider configured -- recording metadata works,
+  audio bytes have nowhere to go.
+- No real AI provider configured in this backend -- structure only, per
+  instruction.
+- Not pushed to GitHub, no Vercel project connected -- Android can only
+  reach this backend on the same LAN as the dev machine right now.
+- `GET /customers/{badId}` 200-vs-404 status code (documented Next.js
+  streaming characteristic, carried over from the prior entry, unchanged).
+- `Customer.status`/`Action`/`AiSummary` full field set exists in the API
+  but the Customer Detail page's UI only shows availability badges, not
+  every individual AI-summary field (`keyPoints`, `sentiment`, etc.) --
+  flagged in `CRM_ARCHITECTURE.md` §14 item 9.

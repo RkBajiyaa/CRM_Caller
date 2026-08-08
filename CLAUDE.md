@@ -10,6 +10,18 @@ until the user changes it.
 > `CHANGELOG.md` for the correction record. Everything past this point
 > reflects the corrected architecture.
 
+## Current status (2026-08-08)
+
+**V1 backend + CRM UI are implemented and tested against the real Neon
+database** — not a plan. Authentication (JWT, bcrypt), Agents, Customers,
+Calls, Recordings (metadata only), Transcripts, AI summaries (structure
+only, nothing fabricated), and Follow-up Actions all have real tables,
+real API routes, and a real UI. See `API_DOCUMENTATION.md` for the tested
+contract, `CHANGELOG.md` for exactly what was verified and how, and
+`ANDROID_API_INTEGRATION.md` for the Android side. Postgres provider is
+**Neon** (locked, not TBD); ORM is **Prisma**. Not yet pushed to GitHub or
+deployed to Vercel.
+
 ## 0. What this folder is
 
 This folder (`Conbun CRM `) is **its own independent project**: the future
@@ -24,10 +36,9 @@ not live inside, the Android app.
   normal web repo from the start (package manager lockfile, `.gitignore`,
   environment variables via Vercel project settings / `.env.local`, not
   hardcoded secrets).
-- **Its data lives in a server-side Postgres database** (managed provider,
-  final choice TBD — see `CRM_ARCHITECTURE.md` open decisions), reached
-  only through this project's own backend/API. Neither the CRM frontend nor
-  the Android app talk to the database directly.
+- **Its data lives in a server-side Postgres database (Neon, connected)**,
+  reached only through this project's own backend/API via Prisma. Neither
+  the CRM frontend nor the Android app talk to the database directly.
 - See `CRM_ARCHITECTURE.md` in this folder for the full architecture:
   frontend, backend/API, database, customer data model, auth, API contract,
   deployment, and implementation phases.
@@ -76,9 +87,10 @@ Android Agent App  --HTTPS API-->  Backend API  <-->  Central Database
 2. **Customer profile data is separate from call-history data** in the
    data model, even though both eventually live in the same database.
 3. **`assignedAgent` (who currently owns the customer) and the calling
-   agent on an individual call are separate concepts** — never the same
-   field. For V1, `assignedAgent` may be free text (no agent directory
-   exists yet).
+   agent on an individual call (`Call.agentId`) are separate concepts** —
+   never the same field. A real `Agent` directory exists now
+   (`assignedAgentId`); `Customer.assignedAgent` (text) stays denormalized
+   from it for backward-compatible display, not a second source of truth.
 4. **`accountCreatedAt` (application/account creation) and
    `crmEntryCreatedAt` (first created in the CRM) are separate fields.**
    `crmEntryCreatedAt` is never "last login."
@@ -94,6 +106,18 @@ Android Agent App  --HTTPS API-->  Backend API  <-->  Central Database
    own `CHANGELOG.md` entry.
 9. **Do not modify `ConbunCall_V4`** except in an explicitly-scoped,
    separately-approved Android-integration task.
+10. **Never print, log, or commit `DATABASE_URL`, `JWT_SECRET`, or any
+    agent password/token** — check them structurally (e.g. `grep -q
+    "<placeholder>"`) when verifying config, never `cat`/echo the value.
+11. **This environment's Neon adapter cannot open the WebSocket session
+    Prisma's interactive transactions need** (`upsert()`, `$transaction([...])`)
+    — confirmed via `prisma/seed.ts` failing until rewritten around it. Use
+    plain sequential `findUnique` + `create`/`update` instead; see
+    `lib/customers/prisma-store.ts`'s comment for the exact pattern. Revisit
+    if this environment's networking ever changes, but don't assume it has.
+12. **Every authenticated API route calls `requireAuth()`
+    (`lib/auth/session.ts`) itself** — `proxy.ts` (Next.js 16's renamed
+    `middleware.ts`) only protects pages, not `/api/*`.
 
 ## 4. Documentation workflow
 
@@ -116,20 +140,25 @@ Android Agent App  --HTTPS API-->  Backend API  <-->  Central Database
    per §1): read `ConbunCall_V4/CLAUDE.md` first and follow its own rules
    while there — but do not edit it as part of CRM work.
 
-## 6. Build & run (verified as of the Phase 1 scaffold)
+## 6. Build & run (verified as of the V1 backend pass — see `CHANGELOG.md`)
 
 - `npm install` — install dependencies.
-- `npm run dev` — local dev server, `http://localhost:3000`.
+- `npm run dev` / `npm run start` — dev / production server, `http://localhost:3000`.
 - `npm run build` — production build (what Vercel runs).
 - `npm run lint` — ESLint.
-- `npm run db:generate` — regenerate the Prisma client (`prisma generate`);
-  works today with zero models.
-- `npm run db:migrate` — `prisma migrate dev`; needs a real `DATABASE_URL`
-  and at least one model, neither of which exist yet (Phase 2+).
-- All of the above except `db:migrate` were actually run and passed during
-  the Phase 1 scaffold — see `CHANGELOG.md` for the exact record. Don't
-  claim something builds/runs/lints clean without actually running it,
-  same standard `ConbunCall_V4/CLAUDE.md` holds itself to.
+- `npm run db:generate` — regenerate the Prisma client (`prisma generate`).
+- `npm run db:migrate` — `prisma migrate dev` (needs `DATABASE_URL`; connected now).
+- `npx prisma migrate status` — check pending/applied migrations before creating a new one.
+- `npx prisma db seed` — creates the one dev-only admin agent (`prisma/seed.ts`); idempotent.
+- `npx prisma db execute --stdin` — for one-off SQL (e.g. deleting a test
+  row) — prefer this over `upsert()`/`$transaction()` in application code,
+  see rule §3.11.
+- All of the above were actually run and passed against the real Neon
+  database, not just reviewed — see `CHANGELOG.md` for the exact record of
+  every pass, including full create → restart → confirm-persisted →
+  update → cleanup cycles. Don't claim something builds/runs/lints/persists
+  clean without actually running it, same standard `ConbunCall_V4/CLAUDE.md`
+  holds itself to.
 
 ## 7. About the Next.js-managed block at the bottom of this file
 

@@ -2,25 +2,28 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { listCustomers, createCustomer, findCustomerByPhoneNumber } from "@/lib/customers/service";
 import { createCustomerSchema } from "@/lib/customers/validation";
+import { requireAuth } from "@/lib/auth/session";
+import { CUSTOMER_STATUSES, type CustomerStatus } from "@/lib/customers/types";
 
 /**
- * GET /api/customers?q=<search>
- * Lists customers, optionally filtered by name/phone/id substring match.
- * Backed by the real `customers` table on Neon Postgres via
- * lib/customers/service.ts -> lib/customers/prisma-store.ts.
+ * GET /api/customers?q=&status=&assignedAgentId=&page=&pageSize=
+ * Lists customers with server-side search/filter/pagination. Backed by the
+ * real `customers` table on Neon Postgres via lib/customers/service.ts.
  */
 export async function GET(request: NextRequest) {
-  const q = request.nextUrl.searchParams.get("q")?.trim().toLowerCase();
-  const customers = await listCustomers();
-  const filtered = q
-    ? customers.filter(
-        (c) =>
-          c.name.toLowerCase().includes(q) ||
-          c.phoneNumber.toLowerCase().includes(q) ||
-          c.id.toLowerCase().includes(q)
-      )
-    : customers;
-  return NextResponse.json({ data: filtered });
+  const auth = await requireAuth(request);
+  if (auth instanceof NextResponse) return auth;
+
+  const params = request.nextUrl.searchParams;
+  const status = params.get("status");
+  const result = await listCustomers({
+    q: params.get("q")?.trim() || undefined,
+    status: status && (CUSTOMER_STATUSES as string[]).includes(status) ? (status as CustomerStatus) : undefined,
+    assignedAgentId: params.get("assignedAgentId")?.trim() || undefined,
+    page: params.get("page") ? Number(params.get("page")) : undefined,
+    pageSize: params.get("pageSize") ? Number(params.get("pageSize")) : undefined,
+  });
+  return NextResponse.json(result);
 }
 
 /**
@@ -29,6 +32,9 @@ export async function GET(request: NextRequest) {
  * here, never accepted from the request body (CLAUDE.md rule #5).
  */
 export async function POST(request: NextRequest) {
+  const auth = await requireAuth(request);
+  if (auth instanceof NextResponse) return auth;
+
   let body: unknown;
   try {
     body = await request.json();

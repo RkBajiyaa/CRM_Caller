@@ -1,9 +1,13 @@
 # Conbun CRM — Architecture Plan (Web App + Backend/API)
 
-Status: **proposal, not yet implemented.** No CRM code, no database tables,
-and no UI exist yet. This document defines the architecture for an
-**independent CRM web application and backend/API** — separate from the
-Android app — before any implementation begins.
+Status: **V1 implemented and tested against the real Neon database.** This
+document is kept as the architectural record; the sections below (system
+overview, tech stack, data model, auth, deployment) describe what was
+actually built, verified by real requests against real data — not a
+forward-looking proposal anymore. For the exact tested API contract, see
+`API_DOCUMENTATION.md`; for what changed and how it was verified in each
+pass, see `CHANGELOG.md`. §14 (Open Decisions) below is updated to mark
+what's now resolved vs. still genuinely open.
 
 > **Supersedes an earlier version of this document** that proposed building
 > CRM screens inside the Android app (`ConbunCall_V4`). That approach was
@@ -394,35 +398,55 @@ summary) and `GET /api/customers/{customerId}/calls` (history) per §9.
 
 ---
 
-## 14. Open decisions / assumptions (need confirmation before Phase 1 code)
+## 14. Open decisions / assumptions
 
-1. **Managed Postgres provider** — Neon, Supabase, or Vercel Postgres all
-   fit; no strong technical reason to prefer one over another at this
-   stage. Needs a pick (cost/ergonomics preference) before Phase 2.
-2. **ORM choice** — Prisma recommended (§2); confirm, or choose the
-   lower-dependency raw-SQL alternative.
-3. **Backend split timing** — V1 assumes Next.js API routes in the same
-   repo as the frontend (§3, §4). Confirm this is acceptable for now, vs.
-   wanting a separate backend service from day one.
-4. **Auth token lifetime/refresh strategy** — not specified; a reasonable
-   default will be proposed at implementation time unless the user has a
-   preference now.
-5. **One phone number per customer** assumed for V1 (matches the Add New
-   User spec's single required field). Flag if multi-number support is
-   actually needed.
-6. **`Customer.status` vocabulary** (e.g. Lead / Active / Inactive / Do
-   Not Call?) is undefined. Needs a product decision before that field is
-   implemented as anything more than a free string.
-7. **Agent model for V1** — no `agents` table/directory yet;
-   `assignedAgent`/calling-agent are free text per the user's own
-   instruction. Flag if a real agent-directory/login-per-agent concept
-   (beyond the CRM-web login in §8) is expected sooner.
-8. **Exact Android DTO reconciliation** (§11) is explicitly deferred to
-   its own future task, not decided now — flagged so it isn't mistaken for
-   already-settled.
-9. **Notes / follow-up / action-status / structured AI-summary display**
-   are explicitly future-phase per the user's own instructions — not part
-   of the V1 data model beyond the placeholder tables noted in §5.
+Resolved during the V1 backend pass (kept here for the record, not
+re-litigated):
+
+1. ~~Managed Postgres provider~~ — **Neon**, connected and migrated.
+2. ~~ORM choice~~ — **Prisma 7**, with the `@prisma/adapter-neon` driver
+   adapter (mandatory in Prisma 7) — see `CHANGELOG.md` for the
+   Node-20-WebSocket fix this required.
+3. ~~Backend split timing~~ — Next.js API routes, same repo, confirmed for
+   V1; service logic stays in `lib/`, not inlined in route handlers, so
+   splitting later is still mechanical if it's ever needed.
+4. **Auth token lifetime/refresh strategy** — resolved as: 7-day HS256 JWT,
+   stateless, no server-side revocation list. Logout only clears the CRM
+   web cookie; a captured bearer token remains valid until it expires.
+   Documented limitation, not revisited this pass.
+5. **One phone number per customer** — still the V1 assumption
+   (`phoneNumber` is `@unique` at the schema level now, enforcing it
+   structurally). Flag if multi-number support becomes a real need.
+6. ~~`Customer.status` vocabulary~~ — resolved: `ACTIVE` / `INACTIVE` /
+   `FOLLOW_UP` / `CLOSED` (already an enum in the schema).
+7. ~~Agent model for V1~~ — resolved: a real `Agent` table exists (name,
+   email, password hash, role, active flag). `Customer.assignedAgentId` is
+   a real FK now; `Customer.assignedAgent` (text) stays denormalized from
+   it for display/backward-compatibility, not a second identity.
+8. **Exact Android DTO reconciliation** — done for the endpoints Phase 11
+   scoped (login, customer lookup/create, call start/finish, recording/
+   transcript/summary metadata) — see `ANDROID_API_INTEGRATION.md`. Not
+   done: wiring those into Android's actual call-completion flow (only
+   login has a real UI call site so far), and an on-device test (no
+   AVD/device was available in this environment — see that doc's "Exact
+   next action").
+9. **Notes / follow-up / action-status** — resolved: a real `Action` model
+   exists (Phase 8), deliberately flat (no workflow engine). Structured
+   AI-summary *display* beyond the availability badge in Call History is
+   still not built — `AiSummary`'s full fields (`keyPoints`,
+   `customerIntent`, `sentiment`, `recommendedAction`) are stored and
+   returned by the API but the Customer Detail page only shows an
+   availability badge, not those fields individually. Flag if that's
+   wanted next.
+10. **Object storage provider** — genuinely still open. `lib/storage/`
+    (Android side would call `lib/db`'s equivalent... i.e. the CRM
+    backend's `lib/storage/index.ts`) reports `{ name: "pending",
+    configured: false }`; no S3/R2/Blob credentials exist. Recording
+    *metadata* works end-to-end; actual audio bytes have nowhere to go
+    yet.
+11. **GitHub/Vercel deployment** — still not done. Needed before Android
+    can reach this backend from anywhere other than the same LAN as the
+    dev machine.
 
 ---
 

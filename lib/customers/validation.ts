@@ -27,7 +27,7 @@ export const createCustomerSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(200),
   phoneNumber: phoneNumberSchema,
   location: z.string().trim().max(200).optional().nullable(),
-  assignedAgent: z.string().trim().max(200).optional().nullable(),
+  assignedAgentId: z.string().trim().min(1).optional().nullable(),
   accountCreatedAt: z
     .string()
     .datetime({ offset: true })

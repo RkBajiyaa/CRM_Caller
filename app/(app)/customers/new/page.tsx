@@ -2,11 +2,14 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/crm/PageHeader";
 import { CustomerForm } from "@/components/crm/CustomerForm";
 import { Card } from "@/components/ui/Card";
+import { listAgents } from "@/lib/agents/service";
 import styles from "./page.module.css";
 
 export const metadata: Metadata = { title: "Add New User -- Conbun CRM" };
+export const dynamic = "force-dynamic";
 
-export default function NewCustomerPage() {
+export default async function NewCustomerPage() {
+  const agents = await listAgents();
   return (
     <div className={styles.formWrap}>
       <PageHeader
@@ -16,7 +19,7 @@ export default function NewCustomerPage() {
         backLabel="Customers"
       />
       <Card>
-        <CustomerForm />
+        <CustomerForm agents={agents} />
       </Card>
     </div>
   );

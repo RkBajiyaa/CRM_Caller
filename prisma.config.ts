@@ -7,6 +7,9 @@ export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
+    // Dev-only seed (one admin agent) -- see prisma/seed.ts. Run with
+    // `npx prisma db seed`. Not run automatically on migrate/deploy.
+    seed: "tsx prisma/seed.ts",
   },
   datasource: {
     url: process.env["DATABASE_URL"],

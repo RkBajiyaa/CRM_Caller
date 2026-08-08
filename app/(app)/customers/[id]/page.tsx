@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getCustomerById } from "@/lib/customers/service";
-import { getMockCallHistory, getMockCallStats } from "@/lib/mock-data/calls";
+import { listCallsForCustomer, getCallStatsForCustomer } from "@/lib/calls/service";
+import { listActionsForCustomer } from "@/lib/actions/service";
 import { PageHeader } from "@/components/crm/PageHeader";
 import { Avatar } from "@/components/crm/Avatar";
 import { StatusBadge } from "@/components/crm/StatusBadge";
 import { StatCard } from "@/components/crm/StatCard";
 import { CallHistoryTable } from "@/components/crm/CallHistoryTable";
+import { FollowUpList } from "@/components/crm/FollowUpList";
 import { Card, CardHeader } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatDateTime, formatDuration } from "@/lib/format";
 import styles from "./page.module.css";
 
@@ -31,8 +32,17 @@ export default async function CustomerDetailPage({ params }: PageProps) {
   const customer = await getCustomerById(id);
   if (!customer) notFound();
 
-  const stats = getMockCallStats(customer.id);
-  const calls = getMockCallHistory(customer.id);
+  // All real data now -- calls/recordings/transcripts/AI-summary status
+  // come from the actual `calls`/`recordings`/`transcripts`/`ai_summaries`
+  // tables (lib/calls/service.ts), not the earlier mock module. A brand
+  // new customer legitimately has zero calls; the empty state below
+  // reflects that honestly instead of showing sample data.
+  const [calls, stats, actions] = [
+    await listCallsForCustomer(id),
+    await getCallStatsForCustomer(id),
+    await listActionsForCustomer(id),
+  ];
+  const actionsByCallId = new Map(actions.filter((a) => a.callId).map((a) => [a.callId as string, a]));
 
   return (
     <div>
@@ -86,15 +96,19 @@ export default async function CustomerDetailPage({ params }: PageProps) {
             </div>
           </Card>
 
+          <Card>
+            <CardHeader title="Follow-ups" subtitle="Reach-outs, callbacks, and other pending actions for this customer" />
+            <FollowUpList actions={actions} customerId={customer.id} />
+          </Card>
+
           <Card padded={false}>
             <div className={styles.historyHeader}>
               <CardHeader
                 title="Call history"
                 subtitle="Recording, transcript, and AI summary availability per call"
-                action={<Badge tone="accent">Sample data</Badge>}
               />
             </div>
-            <CallHistoryTable calls={calls} />
+            <CallHistoryTable calls={calls} actionsByCallId={actionsByCallId} />
           </Card>
         </div>
       </div>

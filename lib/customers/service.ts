@@ -1,14 +1,16 @@
 /**
  * Customer service -- the single seam between "where customer data comes
  * from" and everything that uses it (API routes, Server Components).
- *
  * Backed by lib/customers/prisma-store.ts, which reads/writes the real
- * `customers` table on Neon Postgres. The mock in-memory store that
- * previously stood in here (lib/customers/mock-store.ts) has been removed
- * from the codebase now that a real database connection exists -- see
- * CHANGELOG.md for the migration record.
+ * `customers` table on Neon Postgres.
  */
-import type { Customer, CreateCustomerInput, UpdateCustomerInput } from "@/lib/customers/types";
+import type {
+  Customer,
+  CreateCustomerInput,
+  UpdateCustomerInput,
+  ListCustomersParams,
+  ListCustomersResult,
+} from "@/lib/customers/types";
 import {
   dbListCustomers,
   dbGetCustomerById,
@@ -17,8 +19,8 @@ import {
   dbUpdateCustomer,
 } from "@/lib/customers/prisma-store";
 
-export async function listCustomers(): Promise<Customer[]> {
-  return dbListCustomers();
+export async function listCustomers(params: ListCustomersParams = {}): Promise<ListCustomersResult> {
+  return dbListCustomers(params);
 }
 
 export async function getCustomerById(id: string): Promise<Customer | null> {

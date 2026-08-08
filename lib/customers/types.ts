@@ -2,7 +2,7 @@
  * Shared Customer types -- used by the service layer, API routes, and UI
  * alike. Deliberately a plain TypeScript shape, not the Prisma-generated
  * type, so UI/API code never depends on Prisma internals directly (only
- * lib/customers/service.ts's implementation does). Mirrors
+ * lib/customers/prisma-store.ts's implementation does). Mirrors
  * prisma/schema.prisma's Customer model field-for-field; dates are ISO
  * strings here since this shape crosses the API/JSON boundary.
  */
@@ -21,7 +21,15 @@ export interface Customer {
   name: string;
   phoneNumber: string;
   location: string | null;
+  /**
+   * Denormalized display name -- kept in sync with assignedAgentId's agent
+   * record on every write (see prisma/schema.prisma's comment on this
+   * column). Preserved for backward compatibility with the existing UI/API
+   * contract; prefer `assignedAgentId` for anything that needs the real
+   * relation (permissions, "my customers" queries).
+   */
   assignedAgent: string | null;
+  assignedAgentId: string | null;
   /** Application/account creation date -- distinct from crmEntryCreatedAt. */
   accountCreatedAt: string | null;
   /** Backend-generated at creation time. Never "last login". */
@@ -41,7 +49,7 @@ export interface CreateCustomerInput {
   name: string;
   phoneNumber: string;
   location?: string | null;
-  assignedAgent?: string | null;
+  assignedAgentId?: string | null;
   accountCreatedAt?: string | null;
   status?: CustomerStatus;
   notes?: string | null;
@@ -51,3 +59,19 @@ export interface CreateCustomerInput {
 export type UpdateCustomerInput = Partial<
   Omit<CreateCustomerInput, "phoneNumber"> & { phoneNumber: string }
 >;
+
+export interface ListCustomersParams {
+  q?: string;
+  status?: CustomerStatus;
+  assignedAgentId?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface ListCustomersResult {
+  data: Customer[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}

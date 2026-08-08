@@ -1,11 +1,8 @@
 // Conbun CRM -- Prisma schema.
 //
-// Phase 2 (current): first business table -- Customer only, per explicit
-// instruction not to create unnecessary future tables yet. Calls,
-// recordings, transcripts, AI summaries, notes, follow-ups are all
-// deliberately NOT modeled here -- see CRM_ARCHITECTURE.md #5-6, #15.
-// The Customer Detail page's call history/stats are mock data for now
-// (lib/mock-data/), not backed by a table, until that's approved.
+// V1 backend: agents/auth, customers, calls, recordings, transcripts, AI
+// summaries, follow-up actions. See CRM_ARCHITECTURE.md and
+// API_DOCUMENTATION.md for the contract these back.
 //
 // learn more: https://pris.ly/d/prisma-schema
 
@@ -24,6 +21,10 @@ datasource db {
   // this project's single source of truth for the connection string.
 }
 
+// ============================================================================
+// Enums
+// ============================================================================
+
 /// Locked status vocabulary (CRM_ARCHITECTURE.md #14 item 6). Kept small on
 /// purpose; extend later without redesigning callers that switch on it.
 enum CustomerStatus {
@@ -32,6 +33,77 @@ enum CustomerStatus {
   FOLLOW_UP
   CLOSED
 }
+
+/// Admin can manage agents; Agent is the normal CRM/Android user role.
+enum AgentRole {
+  ADMIN
+  AGENT
+}
+
+enum CallDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum CallStatus {
+  ANSWERED
+  MISSED
+  REJECTED
+  FAILED
+}
+
+/// Shared by recordings/transcripts/AI summaries -- all three are
+/// asynchronous pipeline outputs that don't exist the instant a call ends.
+enum ProcessingStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+/// Kept deliberately small per instruction -- not a full workflow engine.
+enum ActionType {
+  FOLLOW_UP
+  REACH_OUT
+  CALLBACK
+  OTHER
+}
+
+enum ActionStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// ============================================================================
+// Agents (auth identity + CRM/Android user)
+// ============================================================================
+
+/// An Agent is both "who logs into the CRM/Android app" and "who a customer
+/// or call can be assigned to" -- one identity, not two, so
+/// Customer.assignedAgentId and Call.agentId reference real accounts
+/// instead of arbitrary strings (CRM_ARCHITECTURE.md Phase 3).
+model Agent {
+  id           String    @id @default(uuid()) @map("agent_id")
+  name         String
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  role         AgentRole @default(AGENT)
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  assignedCustomers Customer[] @relation("CustomerAssignedAgent")
+  calls             Call[]
+  actions           Action[]
+
+  @@map("agents")
+}
+
+// ============================================================================
+// Customers
+// ============================================================================
 
 /// CRM customer profile -- deliberately separate from call-history data
 /// (CLAUDE.md rule #2). `id` is the backend-generated, permanent
@@ -49,8 +121,21 @@ model Customer {
   /// removed or repurposed.
   phoneNumber String @unique @map("phone_number")
 
-  location      String?
+  location String?
+
+  /// Denormalized display name, kept for backward compatibility with the
+  /// existing API/UI contract (CLAUDE.md rule: preserve existing contracts
+  /// where possible). When `assignedAgentId` is set, this is kept in sync
+  /// with that agent's name on every write; it's what the customers table
+  /// and detail page have always displayed. Still nullable/free-standing
+  /// so existing rows and any not-yet-agent-linked assignment keep working.
   assignedAgent String? @map("assigned_agent")
+
+  /// Real relation to Agent, added in V1 (CRM_ARCHITECTURE.md Phase 3) so
+  /// assignment can eventually drive permissions/queries ("my customers"),
+  /// not just display text. Nullable: a customer can be unassigned.
+  assignedAgentId String? @map("assigned_agent_id")
+  assignedAgentRef Agent? @relation("CustomerAssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
 
   /// Application/account creation date -- distinct from crmEntryCreatedAt.
   /// Optional: may be unknown at CRM-entry time.
@@ -62,12 +147,180 @@ model Customer {
 
   status CustomerStatus @default(ACTIVE)
 
-  /// Free-text placeholder for V1. Structured notes/follow-ups are a
-  /// future phase (CRM_ARCHITECTURE.md #14 item 9), not this field.
+  /// Free-text placeholder for V1. Structured notes/follow-ups live in the
+  /// Action model instead (CRM_ARCHITECTURE.md Phase 8).
   notes String?
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  calls   Call[]
+  actions Action[]
+
+  @@index([assignedAgentId])
+  @@index([status])
   @@map("customers")
+}
+
+// ============================================================================
+// Calls
+// ============================================================================
+
+/// A Call always belongs to a Customer by `customerId` -- never matched by
+/// phone number at the data-model level (CLAUDE.md rule #1). `phoneNumber`
+/// below is a point-in-time snapshot of what was dialed/received, for
+/// display and audit, not a relationship.
+model Call {
+  id         String @id @default(uuid()) @map("call_id")
+  customerId String @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// The agent who actually made/took this call -- distinct from
+  /// Customer.assignedAgentId (CLAUDE.md rule #3). Nullable: a call can be
+  /// reported before an agent identity is resolved, or by automation.
+  agentId String? @map("agent_id")
+  agent   Agent?  @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  phoneNumber String        @map("phone_number")
+  direction   CallDirection
+
+  /// Nullable deliberately: the outcome (answered/missed/rejected/failed)
+  /// isn't known at "start call" time, only at "finish call" -- matches
+  /// the two-step start/finish lifecycle the API exposes (POST /api/calls
+  /// then PATCH /api/calls/{id}). A call sitting at `status: null` means
+  /// "started, not yet finished," not "unknown forever."
+  status CallStatus?
+
+  startedAt       DateTime  @map("started_at")
+  endedAt         DateTime? @map("ended_at")
+  durationSeconds Int       @default(0) @map("duration_seconds")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  recording  Recording?
+  transcript Transcript?
+  aiSummary  AiSummary?
+  actions    Action[]
+
+  @@index([customerId])
+  @@index([agentId])
+  @@index([startedAt])
+  @@map("calls")
+}
+
+// ============================================================================
+// Recordings (metadata only -- see lib/storage/, no audio bytes in Postgres)
+// ============================================================================
+
+/// Metadata/reference only. The actual audio file lives in object storage
+/// (CRM_ARCHITECTURE.md Phase 5) behind the interface in lib/storage/ --
+/// this row is just what the CRM needs to know a recording exists and
+/// where to fetch it from once a real provider is configured.
+model Recording {
+  id     String @id @default(uuid()) @map("recording_id")
+  callId String @unique @map("call_id")
+  call   Call   @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  /// Which lib/storage/ provider this key belongs to -- "pending" means no
+  /// object storage is configured yet and no file has actually been
+  /// uploaded anywhere (see lib/storage/index.ts).
+  storageProvider String  @default("pending") @map("storage_provider")
+  storageKey      String? @map("storage_key")
+
+  durationSeconds Int?    @map("duration_seconds")
+  mimeType        String? @map("mime_type")
+  sizeBytes       Int?    @map("size_bytes")
+
+  processingStatus ProcessingStatus @default(PENDING) @map("processing_status")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("recordings")
+}
+
+// ============================================================================
+// Transcripts
+// ============================================================================
+
+/// One transcript per call, produced by Conbun Call's existing Android-side
+/// Whisper pipeline and uploaded here -- this backend does not run its own
+/// transcription (CRM_ARCHITECTURE.md Phase 6).
+model Transcript {
+  id     String @id @default(uuid()) @map("transcript_id")
+  callId String @unique @map("call_id")
+  call   Call   @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  text     String?
+  language String?
+
+  processingStatus ProcessingStatus @default(PENDING) @map("processing_status")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("transcripts")
+}
+
+// ============================================================================
+// AI summaries
+// ============================================================================
+
+/// Structure only in V1 -- no AI provider is wired up here (the Android
+/// app's own OpenAI integration is the only AI pipeline that exists right
+/// now). `processingStatus` starts and stays PENDING until a real summary
+/// is submitted; never fabricated (CRM_ARCHITECTURE.md Phase 7).
+model AiSummary {
+  id     String @id @default(uuid()) @map("summary_id")
+  callId String @unique @map("call_id")
+  call   Call   @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  summaryText       String? @map("summary_text")
+  keyPoints         String[] @map("key_points")
+  customerIntent    String? @map("customer_intent")
+  sentiment         String?
+  recommendedAction String? @map("recommended_action")
+  followUpRequired  Boolean @default(false) @map("follow_up_required")
+
+  processingStatus ProcessingStatus @default(PENDING) @map("processing_status")
+  modelProvider    String?          @map("model_provider")
+  modelName        String?          @map("model_name")
+  generatedAt      DateTime?        @map("generated_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("ai_summaries")
+}
+
+// ============================================================================
+// Follow-up / actions
+// ============================================================================
+
+/// Deliberately small: one flat model, no workflow engine
+// (CRM_ARCHITECTURE.md Phase 8 -- "do not overbuild workflow automation").
+model Action {
+  id         String   @id @default(uuid()) @map("action_id")
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  callId String? @map("call_id")
+  call   Call?   @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  assignedAgentId String? @map("assigned_agent_id")
+  assignedAgent   Agent?  @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+
+  type   ActionType   @default(FOLLOW_UP)
+  notes  String?
+  dueDate DateTime?   @map("due_date")
+  status ActionStatus @default(PENDING)
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  completedAt DateTime? @map("completed_at")
+
+  @@index([customerId])
+  @@index([assignedAgentId])
+  @@index([status])
+  @@map("actions")
 }

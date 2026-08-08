@@ -1,15 +1,24 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { LogoutButton } from "@/components/crm/LogoutButton";
+import { initials } from "@/lib/format";
 import styles from "./Sidebar.module.css";
 
-const NAV_ITEMS = [
-  { label: "Customers", href: "/customers", active: true },
-  { label: "Calls", href: null, active: false },
-  { label: "Reports", href: null, active: false },
-  { label: "Settings", href: null, active: false },
-];
+interface SidebarProps {
+  agentName: string | null;
+  agentRole: "ADMIN" | "AGENT" | null;
+}
 
-/** Static primary navigation. Only "Customers" is a real, built section this phase -- the rest are shown, disabled, to communicate where the product is headed without faking pages that don't exist yet. */
-export function Sidebar() {
+/** Primary navigation. "Agents" only shows for admins (role-gated both here and, authoritatively, at the API level -- lib/auth/session.ts's requireRole). "Calls"/"Reports" remain disabled placeholders -- no standalone pages for those yet, call data lives inside the customer detail page. Client Component (not the parent Server Component layout) specifically so `usePathname()` can highlight the current section correctly now that there's more than one real link. */
+export function Sidebar({ agentName, agentRole }: SidebarProps) {
+  const pathname = usePathname();
+  const navItems = [
+    { label: "Customers", href: "/customers" as const },
+    ...(agentRole === "ADMIN" ? [{ label: "Agents", href: "/agents" as const }] : []),
+  ];
+
   return (
     <aside className={styles.sidebar}>
       <div className={styles.brand}>
@@ -17,22 +26,40 @@ export function Sidebar() {
         <span className={styles.brandName}>Conbun CRM</span>
       </div>
       <nav className={styles.nav}>
-        {NAV_ITEMS.map((item) =>
-          item.href ? (
-            <Link key={item.label} href={item.href} className={`${styles.navItem} ${styles.navItemActive}`}>
+        {navItems.map((item) => {
+          const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              className={isActive ? `${styles.navItem} ${styles.navItemActive}` : styles.navItem}
+            >
               {item.label}
             </Link>
-          ) : (
-            <span key={item.label} className={styles.navItemDisabled} aria-disabled="true">
-              {item.label}
-              <span className={styles.soon}>Soon</span>
-            </span>
-          )
-        )}
+          );
+        })}
+        <span className={styles.navItemDisabled} aria-disabled="true">
+          Calls
+          <span className={styles.soon}>Soon</span>
+        </span>
+        <span className={styles.navItemDisabled} aria-disabled="true">
+          Reports
+          <span className={styles.soon}>Soon</span>
+        </span>
       </nav>
       <div className={styles.footer}>
-        <p className={styles.footerText}>Conbun Call CRM</p>
-        <p className={styles.footerVersion}>Phase 2 -- v0.1.0</p>
+        {agentName ? (
+          <div className={styles.userRow}>
+            <span className={styles.userAvatar}>{initials(agentName)}</span>
+            <div className={styles.userText}>
+              <span className={styles.userName}>{agentName}</span>
+              <span className={styles.userRole}>{agentRole === "ADMIN" ? "Admin" : "Agent"}</span>
+            </div>
+            <LogoutButton />
+          </div>
+        ) : (
+          <p className={styles.footerText}>Conbun Call CRM</p>
+        )}
       </div>
     </aside>
   );

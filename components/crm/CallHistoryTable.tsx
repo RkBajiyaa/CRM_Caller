@@ -1,23 +1,45 @@
-import type { CallRecord } from "@/lib/mock-data/calls";
-import { Badge } from "@/components/ui/Badge";
+import type { Call } from "@/lib/calls/types";
+import type { Action } from "@/lib/actions/types";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { StateMessage } from "@/components/crm/StateMessage";
 import { formatDateTime, formatDuration } from "@/lib/format";
 import styles from "./CallHistoryTable.module.css";
 
-const DIRECTION_LABEL: Record<CallRecord["direction"], string> = {
+const DIRECTION_LABEL: Record<Call["direction"], string> = {
   INCOMING: "Incoming",
   OUTGOING: "Outgoing",
 };
 
+const CALL_STATUS_BADGE: Record<NonNullable<Call["status"]>, { label: string; tone: BadgeTone }> = {
+  ANSWERED: { label: "Answered", tone: "success" },
+  MISSED: { label: "Missed", tone: "danger" },
+  REJECTED: { label: "Rejected", tone: "danger" },
+  FAILED: { label: "Failed", tone: "danger" },
+};
+
+const PROCESSING_BADGE: Record<string, { label: string; tone: BadgeTone }> = {
+  DONE: { label: "Available", tone: "accent" },
+  PROCESSING: { label: "Processing", tone: "warning" },
+  PENDING: { label: "Pending", tone: "neutral" },
+  FAILED: { label: "Failed", tone: "danger" },
+};
+
+const ACTION_STATUS_LABEL: Record<Action["status"], string> = {
+  PENDING: "Pending",
+  IN_PROGRESS: "In progress",
+  COMPLETED: "Completed",
+  CANCELLED: "Cancelled",
+};
+
 /**
- * Renders mock call history (lib/mock-data/calls.ts -- no calls table
- * exists yet). Shows availability, not invented content: recording,
- * transcript, and AI summary are each a status badge ("Available" /
- * "Not available yet"), never fabricated transcript text or a summary
- * presented as if it were real -- per explicit instruction not to invent
- * recordings/transcripts/AI summaries.
+ * Real call history -- backed by lib/calls/service.ts (the `calls` table),
+ * not mock data. Recording/transcript/AI-summary each show their real
+ * processingStatus as a badge, never fabricated content -- "Not available
+ * yet" for AI summary is not a placeholder string, it's what the API
+ * genuinely reports when no summary has been submitted
+ * (CRM_ARCHITECTURE.md Phase 7).
  */
-export function CallHistoryTable({ calls }: { calls: CallRecord[] }) {
+export function CallHistoryTable({ calls, actionsByCallId }: { calls: Call[]; actionsByCallId: Map<string, Action> }) {
   if (calls.length === 0) {
     return <StateMessage title="No calls yet" description="No call history recorded for this customer." />;
   }
@@ -34,31 +56,41 @@ export function CallHistoryTable({ calls }: { calls: CallRecord[] }) {
           <th className={styles.colBadge}>Recording</th>
           <th className={styles.colBadge}>Transcript</th>
           <th className={styles.colBadge}>AI summary</th>
+          <th className={styles.colFollowUp}>Follow-up</th>
         </tr>
       </thead>
       <tbody>
-        {calls.map((call) => (
-          <tr key={call.id}>
-            <td>{formatDateTime(call.timestamp)}</td>
-            <td className={styles.muted}>{call.agent}</td>
-            <td className={styles.muted}>{DIRECTION_LABEL[call.direction]}</td>
-            <td>
-              <Badge tone={call.outcome === "ANSWERED" ? "success" : "danger"}>
-                {call.outcome === "ANSWERED" ? "Answered" : "Missed"}
-              </Badge>
-            </td>
-            <td className={styles.muted}>{call.outcome === "ANSWERED" ? formatDuration(call.durationSeconds) : "--"}</td>
-            <td>
-              {call.hasRecording ? <Badge tone="accent">Available</Badge> : <Badge tone="neutral">None</Badge>}
-            </td>
-            <td>
-              {call.transcript ? <Badge tone="accent">Available</Badge> : <Badge tone="neutral">None</Badge>}
-            </td>
-            <td>
-              <Badge tone="neutral">Not available yet</Badge>
-            </td>
-          </tr>
-        ))}
+        {calls.map((call) => {
+          const action = actionsByCallId.get(call.id);
+          const recordingBadge = call.hasRecording ? PROCESSING_BADGE.DONE : PROCESSING_BADGE.PENDING;
+          const transcriptBadge = call.transcriptStatus ? PROCESSING_BADGE[call.transcriptStatus] : PROCESSING_BADGE.PENDING;
+          const summaryBadge = call.aiSummaryStatus ? PROCESSING_BADGE[call.aiSummaryStatus] : PROCESSING_BADGE.PENDING;
+          return (
+            <tr key={call.id}>
+              <td>{formatDateTime(call.startedAt)}</td>
+              <td className={styles.muted}>{call.agentName ?? "Unassigned"}</td>
+              <td className={styles.muted}>{DIRECTION_LABEL[call.direction]}</td>
+              <td>
+                {call.status ? (
+                  <Badge tone={CALL_STATUS_BADGE[call.status].tone}>{CALL_STATUS_BADGE[call.status].label}</Badge>
+                ) : (
+                  <Badge tone="warning">In progress</Badge>
+                )}
+              </td>
+              <td className={styles.muted}>{call.status === "ANSWERED" ? formatDuration(call.durationSeconds) : "--"}</td>
+              <td>
+                <Badge tone={call.hasRecording ? "accent" : "neutral"}>{recordingBadge.label === "Available" ? "Available" : "None"}</Badge>
+              </td>
+              <td>
+                <Badge tone={transcriptBadge.tone}>{transcriptBadge.label}</Badge>
+              </td>
+              <td>
+                <Badge tone={summaryBadge.tone}>{call.aiSummaryStatus === "DONE" ? "Available" : "Not available yet"}</Badge>
+              </td>
+              <td className={styles.muted}>{action ? ACTION_STATUS_LABEL[action.status] : "--"}</td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

@@ -6,13 +6,14 @@ import { TextField, SelectField } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { createCustomerRequest } from "@/lib/api-client/customers";
 import { CUSTOMER_STATUSES, type CustomerStatus } from "@/lib/customers/types";
+import type { Agent } from "@/lib/agents/types";
 import styles from "./CustomerForm.module.css";
 
 interface FormState {
   name: string;
   phoneNumber: string;
   location: string;
-  assignedAgent: string;
+  assignedAgentId: string;
   status: CustomerStatus;
 }
 
@@ -20,7 +21,7 @@ const INITIAL: FormState = {
   name: "",
   phoneNumber: "",
   location: "",
-  assignedAgent: "",
+  assignedAgentId: "",
   status: "ACTIVE",
 };
 
@@ -37,13 +38,19 @@ const STATUS_LABELS: Record<CustomerStatus, string> = {
  * flow. Account creation date and notes exist in the data model/API for
  * later (e.g. an edit screen) but aren't part of this form.
  *
+ * "Assigned agent" is a real picker over actual Agent accounts
+ * (CRM_ARCHITECTURE.md Phase 3) instead of free text, submitting
+ * `assignedAgentId` -- the backend denormalizes the agent's current name
+ * into `Customer.assignedAgent` for display, so existing read paths don't
+ * need to change.
+ *
  * Client-side checks below are for immediate feedback only -- the API
  * route re-validates everything server-side with the same zod schema
  * (lib/customers/validation.ts) and is the authoritative check. `id`/
  * `crmEntryCreatedAt` are never fields here -- the backend generates both
  * (CLAUDE.md rule #5).
  */
-export function CustomerForm() {
+export function CustomerForm({ agents }: { agents: Agent[] }) {
   const router = useRouter();
   const [form, setForm] = useState<FormState>(INITIAL);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof FormState, string>>>({});
@@ -74,7 +81,7 @@ export function CustomerForm() {
       name: form.name.trim(),
       phoneNumber: form.phoneNumber.trim(),
       location: form.location.trim() || null,
-      assignedAgent: form.assignedAgent.trim() || null,
+      assignedAgentId: form.assignedAgentId || null,
       status: form.status,
     });
     setSubmitting(false);
@@ -120,14 +127,20 @@ export function CustomerForm() {
           onChange={(e) => set("location", e.target.value)}
           placeholder="e.g. Jaipur, Rajasthan"
         />
-        <TextField
-          id="assignedAgent"
+        <SelectField
+          id="assignedAgentId"
           label="Assigned agent"
-          value={form.assignedAgent}
-          onChange={(e) => set("assignedAgent", e.target.value)}
-          hint="Free text for now"
-          placeholder="e.g. Rahul Bajiya"
-        />
+          value={form.assignedAgentId}
+          onChange={(e) => set("assignedAgentId", e.target.value)}
+          hint={agents.length === 0 ? "No agents exist yet -- create one first (Agents page)" : undefined}
+        >
+          <option value="">Unassigned</option>
+          {agents.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.name}
+            </option>
+          ))}
+        </SelectField>
       </div>
       <SelectField
         id="status"

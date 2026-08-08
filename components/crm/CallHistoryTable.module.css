@@ -4,22 +4,25 @@
 }
 
 .colWhen {
-  width: 20%;
+  width: 16%;
 }
 .colAgent {
-  width: 15%;
+  width: 12%;
 }
 .colDirection {
-  width: 10%;
+  width: 9%;
 }
 .colStatus {
-  width: 11%;
-}
-.colDuration {
   width: 10%;
 }
+.colDuration {
+  width: 8%;
+}
 .colBadge {
-  width: 11.33%;
+  width: 11%;
+}
+.colFollowUp {
+  width: 10%;
 }
 
 .table th {
