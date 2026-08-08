@@ -1,0 +1,46 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.bar {
+  height: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--color-neutral-soft);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.wide {
+  width: 220px;
+}
+.medium {
+  width: 140px;
+}
+.narrow {
+  width: 80px;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}

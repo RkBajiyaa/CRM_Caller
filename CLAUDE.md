@@ -133,15 +133,26 @@ Android Agent App  --HTTPS API-->  Backend API  <-->  Central Database
 
 ## 7. About the Next.js-managed block at the bottom of this file
 
-If you see a `<!-- BEGIN:nextjs-agent-rules -->` … `<!-- END:nextjs-agent-rules -->`
-block below this line: that's auto-generated and re-synced by `next dev`
-itself (Next.js 16's own "agent rules" feature, not us), the first time it
-detects it's running under an AI coding agent in a repo that has a
-`CLAUDE.md` but no `AGENTS.md`. It's additive/append-only, safe, and
-intentionally left in place per Next.js's own guidance (removing it just
-re-creates the diff on the next `next dev`). Everything **above** this
-section is this project's own authored governance; the managed block below
-is Next.js's, not ours — don't edit it by hand, and don't confuse it for a
+Next.js 16's `next dev` (not us) appends its own managed section titled
+"This is NOT the Next.js you know" to the very end of this file the first
+time it detects it's running under an AI coding agent in a repo that has
+this file but no separate agent-instructions file. It is additive and safe
+by design, and intentionally left in place per Next.js's own guidance.
+
+**Caution for future edits to this section:** do not spell out that
+block's opening/closing HTML-comment marker verbatim anywhere in this
+file's prose (not even inside backticks) -- `next dev`'s own upsert logic
+does a plain substring search for those exact markers across the *whole*
+file, not a scoped one, so an example/quote of the marker text earlier in
+this document gets treated as the start of "the" block and everything
+between it and the real marker near the end gets mangled together. (This
+happened once already during the Phase 2 UI pass -- see `CHANGELOG.md` for
+the incident and fix.) Refer to the block by its heading text instead, as
+this section does.
+
+Everything above this line is this project's own authored governance; if a
+"This is NOT the Next.js you know" section appears below, that part is
+Next.js's, not ours -- don't hand-edit it, and don't confuse it for a
 standing project rule.
 
 <!-- BEGIN:nextjs-agent-rules -->

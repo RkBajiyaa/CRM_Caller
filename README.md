@@ -4,62 +4,95 @@ Customer-relationship web application + backend/API for Conbun Call. See
 [`CRM_ARCHITECTURE.md`](./CRM_ARCHITECTURE.md) for the full architecture and
 [`CLAUDE.md`](./CLAUDE.md) for the working rules governing this repo.
 
-**Status: Phase 1 (project scaffold).** No customer data model, no
-authentication, no CRM UI exist yet. This is intentionally just a running,
-deployable Next.js shell with Prisma wired up but no business tables. See
-`CHANGELOG.md` for what's actually been built so far.
+**Status: Phase 2 (database foundation + first CRM UI).** A real `Customer`
+table is designed and migration-ready (not yet applied -- no live database
+connection configured, see below). The Customers list, Add New User form,
+and Customer Detail pages are built and working, backed by clearly-labeled
+in-memory seed data everywhere the real database/call pipeline doesn't
+exist yet. See `CHANGELOG.md` for the exact, tested record.
 
 This is **not** the Android app. The existing Conbun Call Android app
 (`ConbunCall_V4`) is a separate, unmodified project — see `CLAUDE.md` §1.
 
 ## Stack
 
-- **Frontend:** Next.js 16 (App Router) + React + TypeScript
+- **Frontend:** Next.js 16 (App Router) + React + TypeScript, plain CSS
+  Modules (no UI framework -- see `CRM_ARCHITECTURE.md` §2)
 - **Backend:** Next.js Route Handlers (`app/api/*`), same repo as the
   frontend for V1 (service logic kept in `lib/`, not inlined in route
   handlers, so it can be extracted into a standalone service later)
-- **Database:** PostgreSQL, hosted on [Neon](https://neon.tech)
+- **Validation:** [Zod](https://zod.dev) at the API boundary
+- **Database:** PostgreSQL, hosted on [Neon](https://neon.tech) --
+  schema designed, **not yet connected** (see "Database / Prisma" below)
 - **ORM:** [Prisma](https://www.prisma.io) 7, with the
   [`@prisma/adapter-neon`](https://www.npmjs.com/package/@prisma/adapter-neon)
-  driver adapter (Prisma 7 requires an explicit adapter; the Neon adapter
-  talks over HTTP/WebSocket rather than a long-lived TCP connection, which
-  fits Vercel's serverless functions much better than a traditional
-  connection-pooled driver)
-- **Deployment:** GitHub → Vercel
+  driver adapter
+- **Deployment:** GitHub → Vercel (not yet pushed/connected -- see
+  `CHANGELOG.md`)
 
 ## Project structure
 
 ```
 app/
-  page.tsx          -- placeholder home page (Phase 1 status only, not CRM UI)
-  layout.tsx
+  page.tsx                    -- redirects to /customers
+  layout.tsx                  -- sidebar + content shell
+  customers/
+    page.tsx                   -- CRM Users page (Server Component)
+    new/page.tsx                -- Add New User
+    [id]/page.tsx                 -- Customer Detail
   api/
-    health/route.ts  -- GET /api/health liveness check, no DB dependency
+    health/route.ts             -- GET /api/health, no DB dependency
+    customers/route.ts           -- GET (list), POST (create)
+    customers/[id]/route.ts       -- GET (one), PATCH (update)
+components/
+  ui/                            -- generic primitives (Button, Field, Card, Badge)
+  crm/                            -- CRM-specific (Sidebar, CustomersExplorer, CallHistoryTable, ...)
 lib/
-  db/
-    prisma.ts         -- shared Prisma client singleton (not imported anywhere yet)
-  generated/
-    prisma/            -- Prisma Client output, gitignored, regenerate with `npm run db:generate`
+  customers/
+    types.ts                      -- shared Customer shape (API + UI)
+    validation.ts                  -- zod schemas, shared by API + form
+    service.ts                      -- the ONE swap point: mock store today, Prisma later
+    mock-store.ts                    -- in-memory seed data, see file header
+  mock-data/calls.ts                -- mock call history/stats, no DB table yet
+  api-client/customers.ts            -- browser-side fetch wrappers for Client Components
+  db/prisma.ts                        -- Prisma client singleton (not queried yet -- no live DB)
+  generated/prisma/                    -- Prisma Client output, gitignored
 prisma/
-  schema.prisma        -- datasource + generator only, no models yet (Phase 2+)
-prisma.config.ts        -- Prisma CLI config (schema path, migrations path, DATABASE_URL)
+  schema.prisma                        -- Customer model + CustomerStatus enum
+  migrations/..._init_customers/        -- first migration, generated offline, NOT applied
+prisma.config.ts
 ```
 
-`app/` is scoped to routes/pages (frontend pages + API route handlers) only.
-`lib/` holds shared backend logic (starting with the DB client). This
-boundary is deliberate -- see `CRM_ARCHITECTURE.md` §3-4 -- so the backend
-can be extracted into its own service later without restructuring.
+`app/` is scoped to routes/pages only. `lib/` holds shared logic (data
+access, validation, formatting). Server Components (`customers/page.tsx`,
+`customers/[id]/page.tsx`) call `lib/customers/service.ts` directly; Client
+Components (the Add New User form) call the `/api/*` routes via
+`lib/api-client/`. This boundary is deliberate -- see `CRM_ARCHITECTURE.md`
+§3-4 -- so the backend can be extracted into its own service later without
+restructuring, and so the mock data layer disappears by changing one file
+(`lib/customers/service.ts`), not by touching any page or component.
 
 ## Running locally
 
 ```bash
 npm install
-npm run dev       # http://localhost:3000
+npm run dev       # http://localhost:3000, redirects to /customers
 ```
 
-Verified working as of the Phase 1 scaffold: `npm run build` (production
-build) and `npm run dev` both succeed; `GET /` and `GET /api/health` both
-respond. See `CHANGELOG.md` for the exact verification record.
+Verified working (see `CHANGELOG.md` for the full record): `npm run lint`,
+`npm run build`, `npm run dev`, and `npm run start` (production server) all
+succeed; the Customers list, Add New User, and Customer Detail pages all
+render real seeded data; `POST`/`PATCH /api/customers` were exercised live
+with `curl` (create, validation errors, duplicate-phone conflict, update,
+404s) -- not just reviewed.
+
+**Known issue, verified and documented, not yet fixed:** `GET
+/customers/{badId}` for a nonexistent customer correctly renders the "not
+found" page but returns HTTP 200 instead of 404 -- a documented Next.js App
+Router streaming characteristic (the initial response status is sent before
+the async `notFound()` call resolves), not a data bug. The equivalent API
+route (`GET /api/customers/{badId}`) returns a correct 404. Revisit if this
+route ever needs to be crawled/indexed; not a problem for an internal tool.
 
 ## Environment variables
 
@@ -71,7 +104,7 @@ hardcoded.
 
 | Variable | Used by | Status |
 |---|---|---|
-| `DATABASE_URL` | Prisma CLI (`prisma.config.ts`) and `lib/db/prisma.ts` at runtime | Placeholder only -- no Neon project has been provisioned yet (nothing to connect to in Phase 1). Real value needed starting Phase 2. |
+| `DATABASE_URL` | Prisma CLI (`prisma.config.ts`) and `lib/db/prisma.ts` at runtime | **Still a placeholder.** The Neon project exists (per the user) but no real connection string has been retrieved into this environment -- `npx neonctl init` could not complete browser authentication here. See "Database / Prisma" below for exactly what's needed. |
 
 More variables (e.g. a JWT signing secret for auth) will be added to both
 this table and `.env.example` when the code that needs them is introduced
@@ -79,23 +112,52 @@ this table and `.env.example` when the code that needs them is introduced
 
 ## Database / Prisma
 
-No tables exist yet (`prisma/schema.prisma` has a datasource + generator
-block only, no models -- intentional, see `CRM_ARCHITECTURE.md` §15 Phase
-1/2). What *is* already wired up and verified:
+**Schema designed, migration generated, neither applied to a real database
+yet** -- `DATABASE_URL` is still a placeholder (see above), so this is as
+far as this could go without it, per explicit instruction to stop and
+report rather than work around a missing credential.
 
-```bash
-npm run db:generate   # prisma generate -- regenerates lib/generated/prisma
-npm run db:migrate     # prisma migrate dev -- not usable yet, no DATABASE_URL / no models
-```
+- `prisma/schema.prisma` -- one model, `Customer` (+ `CustomerStatus`
+  enum), matching `CRM_ARCHITECTURE.md` §6 field-for-field. `npx prisma
+  validate` passes.
+- `prisma/migrations/<timestamp>_init_customers/migration.sql` -- the
+  initial migration SQL, generated **offline** via `prisma migrate diff
+  --from-empty --to-schema prisma/schema.prisma --script` (this diff mode
+  needs no live database connection, unlike `prisma migrate dev`). Reviewed
+  by hand; not yet applied anywhere.
+- `npm run db:generate` (`prisma generate`) succeeds today and produces a
+  working, typed `Customer` client in `lib/generated/prisma` -- verified.
+- `npm run db:migrate` (`prisma migrate dev`) has **not** been run and will
+  fail until `DATABASE_URL` is real.
 
-`npm run db:generate` succeeds today even with zero models. `db:migrate`
-needs a real Neon connection string and at least one model before it does
-anything meaningful -- that's Phase 2.
+**To finish Phase A once a real Neon connection string is available:**
+1. Put the real connection string in `.env` (`DATABASE_URL=...`).
+2. `npx prisma migrate deploy` -- applies the already-generated migration
+   above (does not try to compute a new diff, just runs the reviewed SQL).
+3. `lib/customers/service.ts` gets a `prisma-store.ts` sibling implementing
+   the same five functions against `prisma.customer.*`, swapped in for the
+   current mock-store import -- no other file changes.
+
+## Mock / seed data (explicit, not hidden)
+
+Two layers of mock data exist right now, each labeled in its own file and
+visible in the UI via a "Seed data" / "Sample call data" badge:
+
+- **Customers** (`lib/customers/mock-store.ts`) -- stand in for the real
+  `Customer` table above until a live database connection exists. In
+  memory only, resets on server restart. Full CRUD (list/get/create/update)
+  works against this store today, through the same `lib/customers/
+  service.ts` interface the Prisma-backed version will use.
+- **Call history / stats** (`lib/mock-data/calls.ts`) -- there is no calls
+  table at all yet (deliberately -- see `CRM_ARCHITECTURE.md` §15 Phase 5).
+  Purely illustrative data for the Customer Detail page's call-activity and
+  call-history sections. AI summaries are hard-coded `null` everywhere and
+  render as "Not available yet" -- no AI summary functionality was added.
 
 ## Deployment
 
 GitHub → Vercel, same build for frontend and API routes (Next.js). Database
 migrations are run explicitly (`prisma migrate deploy`), not automatically
 on every deploy. See `CRM_ARCHITECTURE.md` §10 for the full deployment
-architecture. Not yet pushed to GitHub or connected to a Vercel project as
-of Phase 1 -- see `CHANGELOG.md` for what's outstanding.
+architecture. **Not yet pushed to GitHub or connected to a Vercel project**
+-- see `CHANGELOG.md` for what's outstanding.

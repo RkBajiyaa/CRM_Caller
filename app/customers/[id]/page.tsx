@@ -1,0 +1,107 @@
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import { getCustomerById } from "@/lib/customers/service";
+import { getMockCallHistory, getMockCallStats } from "@/lib/mock-data/calls";
+import { PageHeader } from "@/components/crm/PageHeader";
+import { Avatar } from "@/components/crm/Avatar";
+import { StatusBadge } from "@/components/crm/StatusBadge";
+import { StatCard } from "@/components/crm/StatCard";
+import { CallHistoryTable } from "@/components/crm/CallHistoryTable";
+import { DemoDataBadge } from "@/components/crm/DemoDataBadge";
+import { Card, CardHeader } from "@/components/ui/Card";
+import { formatDate, formatDateTime, formatDuration } from "@/lib/format";
+import styles from "./page.module.css";
+
+interface PageProps {
+  params: Promise<{ id: string }>;
+}
+
+// Same reasoning as app/customers/page.tsx -- reads mutable data, must not
+// be statically cached across requests.
+export const dynamic = "force-dynamic";
+
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { id } = await params;
+  const customer = await getCustomerById(id);
+  return { title: customer ? `${customer.name} -- Conbun CRM` : "Customer not found -- Conbun CRM" };
+}
+
+export default async function CustomerDetailPage({ params }: PageProps) {
+  const { id } = await params;
+  const customer = await getCustomerById(id);
+  if (!customer) notFound();
+
+  const stats = getMockCallStats(customer.id);
+  const calls = getMockCallHistory(customer.id);
+
+  return (
+    <div>
+      <PageHeader title={customer.name} backHref="/customers" backLabel="Customers" />
+
+      <div className={styles.layout}>
+        <Card className={styles.profileCard}>
+          <div className={styles.profileHead}>
+            <Avatar name={customer.name} size="lg" />
+            <div>
+              <h2 className={styles.name}>{customer.name}</h2>
+              <StatusBadge status={customer.status} />
+            </div>
+          </div>
+
+          <dl className={styles.fieldList}>
+            <ProfileField label="Customer ID" value={customer.id} mono />
+            <ProfileField label="Phone number" value={customer.phoneNumber} />
+            <ProfileField label="Location" value={customer.location ?? "--"} />
+            <ProfileField label="Account / application created" value={formatDate(customer.accountCreatedAt)} />
+            <ProfileField label="CRM entry date" value={formatDate(customer.crmEntryCreatedAt)} />
+            <ProfileField label="Assigned agent" value={customer.assignedAgent ?? "Unassigned"} />
+          </dl>
+
+          {customer.notes && (
+            <div className={styles.notes}>
+              <p className={styles.notesLabel}>Notes</p>
+              <p className={styles.notesBody}>{customer.notes}</p>
+            </div>
+          )}
+        </Card>
+
+        <div className={styles.mainColumn}>
+          <Card>
+            <CardHeader title="Call activity" subtitle="Summary across all recorded calls" action={<DemoDataBadge kind="calls" />} />
+            <div className={styles.statsGrid}>
+              <StatCard label="Total calls" value={stats.totalCalls} />
+              <StatCard label="Answered" value={stats.answeredCalls} />
+              <StatCard label="Missed" value={stats.missedCalls} />
+              <StatCard label="Incoming" value={stats.incomingCalls} />
+              <StatCard label="Outgoing" value={stats.outgoingCalls} />
+              <StatCard label="Total talk time" value={formatDuration(stats.totalConversationSeconds)} />
+              <StatCard
+                label="Last contacted"
+                value={stats.lastContactedAt ? formatDateTime(stats.lastContactedAt) : "Never"}
+                hint={stats.lastContactedByAgent ? `by ${stats.lastContactedByAgent}` : undefined}
+              />
+            </div>
+          </Card>
+
+          <Card padded={false}>
+            <div className={styles.historyHeader}>
+              <CardHeader title="Call history" subtitle="Each call links to its recording, transcript, and (later) AI summary" />
+            </div>
+            <CallHistoryTable calls={calls} />
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfileField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className={styles.field}>
+      <dt className={styles.fieldLabel}>{label}</dt>
+      <dd className={[styles.fieldValue, mono && styles.mono].filter(Boolean).join(" ")} title={value}>
+        {value}
+      </dd>
+    </div>
+  );
+}

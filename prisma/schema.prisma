@@ -1,9 +1,11 @@
 // Conbun CRM -- Prisma schema.
 //
-// Phase 1 (current): datasource + generator only, deliberately no models.
-// Business tables (customers, calls, etc.) are added starting Phase 2 --
-// see CRM_ARCHITECTURE.md #5-6, #15. Keeping this empty for now is
-// intentional, not an oversight.
+// Phase 2 (current): first business table -- Customer only, per explicit
+// instruction not to create unnecessary future tables yet. Calls,
+// recordings, transcripts, AI summaries, notes, follow-ups are all
+// deliberately NOT modeled here -- see CRM_ARCHITECTURE.md #5-6, #15.
+// The Customer Detail page's call history/stats are mock data for now
+// (lib/mock-data/), not backed by a table, until that's approved.
 //
 // learn more: https://pris.ly/d/prisma-schema
 
@@ -20,4 +22,52 @@ datasource db {
   // No `url` here deliberately -- Prisma 7 reads the connection string from
   // prisma.config.ts (datasource.url -> process.env.DATABASE_URL), which is
   // this project's single source of truth for the connection string.
+}
+
+/// Locked status vocabulary (CRM_ARCHITECTURE.md #14 item 6). Kept small on
+/// purpose; extend later without redesigning callers that switch on it.
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  FOLLOW_UP
+  CLOSED
+}
+
+/// CRM customer profile -- deliberately separate from call-history data
+/// (CLAUDE.md rule #2). `id` is the backend-generated, permanent
+/// `customerId`; `phoneNumber` is a lookup/matching field, never the
+/// identity (CLAUDE.md rule #1).
+model Customer {
+  id   String @id @default(uuid()) @map("customer_id")
+  name String
+
+  /// One phone number per customer for V1 (CRM_ARCHITECTURE.md #14 item 5).
+  /// Unique so it can double as a safe lookup key without a separate
+  /// uniqueness check in application code. If multi-number support is ever
+  /// needed, this stays as "the primary number" and a separate
+  /// CustomerPhone join table is added additively -- this column is not
+  /// removed or repurposed.
+  phoneNumber String @unique @map("phone_number")
+
+  location      String?
+  assignedAgent String? @map("assigned_agent")
+
+  /// Application/account creation date -- distinct from crmEntryCreatedAt.
+  /// Optional: may be unknown at CRM-entry time.
+  accountCreatedAt DateTime? @map("account_created_at")
+
+  /// Backend-generated at creation time. NOT "last login" -- CLAUDE.md
+  /// rule #4.
+  crmEntryCreatedAt DateTime @default(now()) @map("crm_entry_created_at")
+
+  status CustomerStatus @default(ACTIVE)
+
+  /// Free-text placeholder for V1. Structured notes/follow-ups are a
+  /// future phase (CRM_ARCHITECTURE.md #14 item 9), not this field.
+  notes String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("customers")
 }

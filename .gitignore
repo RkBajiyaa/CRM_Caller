@@ -39,6 +39,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# neonctl local CLI state (from `npx neonctl init`) -- local tooling state,
+# not project config, not committed (same treatment as .claude/settings.local.json)
+.neon
+
 # Claude Code local (per-machine) settings -- not project config
 .claude/settings.local.json
 

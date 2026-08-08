@@ -453,3 +453,332 @@ at the end of the file — **not a duplicate block.** No action needed.
   remote, no Vercel project, no models/tables, no auth, no CRM UI. All
   correctly out of scope for Phase 1.
 - Phase 1 is now verification-complete. Awaiting approval before Phase 2.
+
+---
+
+## 2026-08-08 — Phase A (database foundation, blocked on missing credential) + Phase B (first real CRM UI + minimal customers API)
+
+User authorized moving fast: lock remaining open decisions, stop writing
+architecture-only docs, and build the real Customer schema/migration plus a
+working CRM UI immediately. This entry covers both.
+
+### Phase A — Database foundation
+
+**DATABASE_URL was checked first, per explicit instruction, without ever
+printing its value.** Result: still the Phase 1 placeholder (`.env` and
+`.env.example` both contain `postgresql://<user>:<password>@<neon-
+project>.neon.tech/<database>?sslmode=require`, unchanged). The user's Neon
+*project* exists, but `npx neonctl init` timed out during browser auth in
+this environment and no real connection string was retrieved. Per explicit
+instruction, this is reported rather than worked around -- **no live
+database connection exists, and none of the DB-connection-requiring steps
+below were attempted.**
+
+**What was done anyway (does not require a live connection):**
+
+**Files created:**
+- `prisma/migrations/20260808131939_init_customers/migration.sql` -- the
+  initial migration SQL. Generated **offline** with `npx prisma migrate
+  diff --from-empty --to-schema prisma/schema.prisma --script`, which
+  (unlike `prisma migrate dev`) computes its diff from the schema file
+  alone and needs no database connection. Reviewed by hand: creates the
+  `CustomerStatus` enum and `customers` table exactly matching the schema
+  below. **Not applied to any database.**
+- `prisma/migrations/migration_lock.toml` -- `provider = "postgresql"`,
+  matching Prisma's own convention for this file.
+
+**Files modified:**
+- `prisma/schema.prisma` -- added the first business model:
+  ```
+  enum CustomerStatus { ACTIVE INACTIVE FOLLOW_UP CLOSED }
+  model Customer {
+    id                String   @id @default(uuid()) @map("customer_id")
+    name              String
+    phoneNumber       String   @unique @map("phone_number")
+    location          String?
+    assignedAgent     String?  @map("assigned_agent")
+    accountCreatedAt  DateTime? @map("account_created_at")
+    crmEntryCreatedAt DateTime @default(now()) @map("crm_entry_created_at")
+    status            CustomerStatus @default(ACTIVE)
+    notes             String?
+    createdAt         DateTime @default(now()) @map("created_at")
+    updatedAt         DateTime @updatedAt @map("updated_at")
+    @@map("customers")
+  }
+  ```
+  Matches `CRM_ARCHITECTURE.md` §6 field-for-field. `phoneNumber` is
+  `@unique` (locks in "one phone number per customer for V1" at the schema
+  level) with a comment explaining how a future multi-number model would
+  be added additively instead of replacing this column. `id` is
+  backend-generated (`@default(uuid())`), never client-supplied.
+  **Caught and fixed during authoring, before validating:** first draft
+  had `createdAt`/`updatedAt`'s `@default(now())`/`@updatedAt` attributes
+  and `@map()` targets accidentally swapped; corrected before running
+  anything.
+- `.env`, `.env.example` -- comments updated to reflect Phase 2 status and
+  the exact next steps once a real connection string exists (`prisma
+  migrate deploy` to apply the already-generated migration above, not
+  `migrate dev`, since the diff is already computed and reviewed).
+
+**Database/schema changes:**
+- None applied. Designed and validated only (see Tests/builds below).
+
+**Tests/builds performed:**
+- `npx prisma validate` -- passed, with the new model.
+- `npm run db:generate` -- passed, produced a typed `Customer` client.
+- `npx prisma migrate diff --from-empty --to-schema ... --script` -- ran
+  successfully offline, output reviewed by hand.
+- `prisma migrate dev` / `prisma migrate deploy` / any connection-verifying
+  command -- **NOT run.** Needs a real `DATABASE_URL`.
+
+**Incomplete / still requiring the user:**
+- **The single missing piece: `DATABASE_URL` in `.env` needs a real Neon
+  connection string.** Get it from the Neon project dashboard (Connection
+  Details -> "Prisma" or "pooled connection" string) and paste it directly
+  into `.env` (not into chat/this conversation). Once set: `npx prisma
+  migrate deploy` applies the migration already sitting in
+  `prisma/migrations/`; no further schema work is needed for it to apply
+  cleanly.
+- `lib/customers/service.ts` still points at the mock store (Phase B,
+  below) -- swapping it to Prisma-backed queries is the next step after
+  the migration is applied, not done automatically by applying it.
+
+### Phase B — First real CRM UI + minimal customers API
+
+**Files created (data/domain layer):**
+- `lib/customers/types.ts` -- shared `Customer`/`CreateCustomerInput`/
+  `UpdateCustomerInput` shapes, used by both API routes and UI.
+- `lib/customers/validation.ts` -- Zod schemas (`createCustomerSchema`,
+  `updateCustomerSchema`), shared by the API routes (authoritative) and the
+  Add New User form (client-side, for immediate feedback only).
+- `lib/customers/mock-store.ts` -- in-memory seed data (6 sample
+  customers spanning every status), explicitly and repeatedly labeled as
+  mock/not-production in its own header comment. See Bugs fixed below for
+  why this ended up `globalThis`-backed rather than a plain module array.
+- `lib/customers/service.ts` -- the single seam between "where customer
+  data comes from" and every caller (API routes, Server Components).
+  Backed by `mock-store.ts` today; swapping to Prisma later is a one-file
+  change (see Phase A "Incomplete" above).
+- `lib/mock-data/calls.ts` -- mock call history/stats, deterministically
+  generated per customer (seeded PRNG keyed by customer id, not `Math.
+  random()`, so a given customer's mock call history is stable across
+  requests within a process). Explicitly documented as having **no
+  database table at all** yet (not even a mock stand-in for one -- there is
+  no `Call` model in `prisma/schema.prisma`), per instruction not to create
+  unnecessary future tables. Every `aiSummary` field is hard-coded `null`.
+- `lib/api-client/customers.ts` -- browser-side `fetch` wrapper
+  (`createCustomerRequest`) used only by Client Components; Server
+  Components call `lib/customers/service.ts` directly instead (no
+  self-HTTP round trip for the initial page render).
+- `lib/format.ts` -- small formatting helpers (dates, duration, initials,
+  short id) shared by every component below.
+
+**Files created (API routes):**
+- `app/api/customers/route.ts` -- `GET` (list, optional `?q=` search),
+  `POST` (create; validates with Zod; 409 on duplicate phone; `id`/
+  `crmEntryCreatedAt` are never read from the request body).
+- `app/api/customers/[id]/route.ts` -- `GET` (one, 404 if missing),
+  `PATCH` (partial update, validates with Zod, `id`/`crmEntryCreatedAt`
+  excluded from the schema entirely so they cannot be edited).
+
+**Files created (UI components, `components/ui/` -- generic primitives):**
+- `Button.tsx`/`.module.css` (+ `LinkButton`), `Field.tsx`/`.module.css`
+  (`TextField`/`SelectField`/`TextAreaField`), `Card.tsx`/`.module.css`
+  (+ `CardHeader`), `Badge.tsx`/`.module.css`.
+
+**Files created (UI components, `components/crm/` -- CRM-specific):**
+- `Sidebar.tsx`/`.module.css` -- static nav; only "Customers" is a real
+  link, "Calls"/"Reports"/"Settings" render disabled with a "Soon" tag
+  instead of linking to pages that don't exist.
+- `PageHeader.tsx`/`.module.css` -- title/subtitle/actions/back-link row,
+  used by the Add New User and Customer Detail pages.
+- `CustomersExplorer.tsx`/`.module.css` -- Client Component: owns search
+  state, renders the title/search/"+ Add New User" row and the customer
+  table together (search box and table must share one parent to share
+  filter state -- see design note in the file).
+- `Avatar.tsx`/`.module.css` -- initials-based default profile picture
+  placeholder (no image upload exists), one component at every size.
+- `StatusBadge.tsx` -- maps `CustomerStatus` to a colored `Badge`.
+- `DemoDataBadge.tsx` -- the explicit, visible "this is not real backend
+  data" marker (two variants: customers vs. calls), so mock data is never
+  presented as if it were live -- shown on both the Customers list and the
+  Customer Detail page's call-activity section.
+- `StatCard.tsx`/`.module.css` -- call-stat tiles (total/answered/missed/
+  incoming/outgoing/talk time/last contacted).
+- `CallHistoryTable.tsx`/`.module.css` -- date/time, agent, direction,
+  answered/missed, duration, recording availability, transcript, AI
+  summary (always "Not available yet"), follow-up.
+- `StateMessage.tsx`/`.module.css` -- shared empty/error message shell.
+- `TableSkeleton.tsx`/`.module.css` -- loading placeholder for the
+  customers table (one subtle CSS pulse, no JS animation library).
+- `CustomerForm.tsx`/`.module.css` -- the Add New User form: name/phone
+  (required), location/assigned agent/account creation date/status/notes
+  (optional), client-side checks for immediate feedback + authoritative
+  server-side validation via the API, inline field errors, disabled submit
+  while saving, redirects to the new customer's detail page on success.
+
+**Files created (pages):**
+- `app/customers/page.tsx` -- CRM Users page (Server Component, fetches via
+  `lib/customers/service.ts` + `lib/mock-data/calls.ts`).
+- `app/customers/loading.tsx`, `app/customers/error.tsx` -- Next.js
+  loading/error-boundary conventions.
+- `app/customers/new/page.tsx` -- Add New User (a dedicated page, not a
+  modal -- simpler, works with the browser back button and direct links,
+  no modal-state management to build; noted as a deliberate choice, not an
+  oversight, since the instructions offered either).
+- `app/customers/[id]/page.tsx`/`page.module.css` -- Customer Detail:
+  profile, call-activity stats, call history. `generateMetadata` sets the
+  page title to the customer's name (or "Customer not found").
+- `app/customers/[id]/loading.tsx`, `error.tsx`, `not-found.tsx` -- Next.js
+  conventions for this segment.
+
+**Files modified:**
+- `app/page.tsx` -- now `redirect("/customers")` instead of the Phase 1
+  placeholder text.
+- `app/layout.tsx`, new `app/shell.module.css` -- root layout now renders
+  the sidebar + content shell around every page.
+- `app/globals.css` -- replaced the `create-next-app` defaults with actual
+  design tokens (colors incl. the Conbun Call Android app's accent orange
+  `#EF812C` for brand consistency, spacing scale, radii, shadows, system
+  font stack -- no `next/font/google`, no new font dependency).
+- `package.json` / `package-lock.json` -- added `zod` (request validation),
+  `@prisma/adapter-neon` + `@neondatabase/serverless` (Prisma 7's mandatory
+  driver adapter, Neon-specific for the serverless-friendly HTTP/WebSocket
+  transport), `dotenv` (already covered in the Phase 1 entry, unchanged
+  here).
+- `.gitignore` -- added `.neon` (local `neonctl` CLI state file found in
+  the working tree, not created by this session, not project config,
+  never inspected beyond its key names -- see Bugs found below).
+
+**Bugs found and fixed (all caught during this session's own manual
+verification, before reporting anything as done):**
+- **Server Component page returned "static" instead of dynamic** --
+  `next build` initially marked `/customers` as `○ (Static)`, meaning
+  production would serve one build-time snapshot forever, so a newly
+  created customer would never appear without a full rebuild. Fixed by
+  adding `export const dynamic = "force-dynamic"` to both
+  `app/customers/page.tsx` and `app/customers/[id]/page.tsx`. Confirmed
+  fixed: both now build as `ƒ (Dynamic)`.
+- **In-memory mock store not actually shared across routes** -- confirmed
+  via live testing: an id returned by `GET /api/customers` produced
+  "Customer not found" when opened at `/customers/{id}`. Root cause:
+  Next.js/Turbopack can compile a route's module graph separately per
+  route even within one `next dev`/`next start` process, so a plain
+  module-level `const customers: Customer[] = [...]` in `mock-store.ts`
+  was not guaranteed to be the same array instance for
+  `app/api/customers/*` and `app/customers/[id]/page.tsx`. Fixed by storing
+  the array on `globalThis` (same pattern already used for the Prisma
+  client singleton in `lib/db/prisma.ts`), which is one process-wide object
+  every module graph resolves identically. Verified fixed by re-running the
+  full create -> list -> detail-page flow end to end (see Tests below).
+- **`next dev`'s own auto-generated `CLAUDE.md` block collided with this
+  file's own prose** -- `CLAUDE.md` §7 (added in the Phase 1 pass)
+  explained Next.js's auto-appended agent-rules block by quoting its exact
+  `<!-- BEGIN:nextjs-agent-rules -->`/`<!-- END:nextjs-agent-rules -->`
+  marker text. `next dev`'s upsert logic does a plain whole-file substring
+  search for those markers (not scoped to its own appended block), so it
+  found the quoted opening marker inside §7's prose as "the" block start
+  and merged/garbled everything between that sentence and the real
+  block's end marker near the end of the file. **Fixed:** rewrote §7 to
+  describe the block by its heading text ("This is NOT the Next.js you
+  know") instead of quoting the literal marker syntax anywhere, and added
+  an explicit warning against reintroducing the literal marker text in
+  this file. Verified fixed by restarting `next dev` after the edit and
+  confirming the file stayed clean (no duplicate/garbled content).
+- **`.neon` file found in the working tree** -- not created by this
+  session (predates it, likely left by the user's earlier `neonctl init`
+  attempt mentioned in their instructions). Inspected structurally only
+  (key names/types, e.g. confirmed it's a small `{"_init": {"features":
+  [...]}}` JSON blob) -- **never printed its values**, per instruction.
+  Added to `.gitignore` rather than committed, treated the same as
+  `.claude/settings.local.json` (local tool state, not project config).
+
+**Known, verified, not-yet-fixed issue:**
+- `GET /customers/{nonexistentId}` renders the correct "Customer not
+  found" page (content verified correct) but returns HTTP 200, not 404 --
+  confirmed under both `next dev` and a real production `next build && next
+  start`, and confirmed **not** fixed by removing the route's
+  `loading.tsx` (tried; no change; `loading.tsx` was restored since
+  removing it cost the loading skeleton for no benefit). This is a known
+  Next.js App Router characteristic: the initial response status is
+  committed before the async Server Component's `notFound()` call
+  resolves. The equivalent API route, `GET /api/customers/{nonexistentId}`,
+  **does** return a correct 404 (verified) -- this only affects the page
+  route's HTTP status, not its content, and not the API. Documented in
+  `README.md`; not chased further this pass given diminishing returns for
+  an internal tool with no SEO/crawling requirement.
+
+**Tests/builds performed (all actually run, this session, not reviewed by
+eye):**
+- `npm run lint` -- clean, zero errors/warnings (two `eslint-disable`
+  comments were flagged as unused and removed -- this project's
+  `eslint-config-next` has no `no-console` rule, so they were never doing
+  anything).
+- `npm run build` -- clean production build, all 8 routes compiled
+  (`/`, `/_not-found`, `/api/customers`, `/api/customers/[id]`,
+  `/api/health`, `/customers`, `/customers/[id]`, `/customers/new`).
+- `npm run dev` and `npm run start` (production) both started
+  successfully and were exercised live with real HTTP requests (not just
+  "it compiled"):
+  - `GET /` -> 307 redirect to `/customers`, confirmed.
+  - `GET /customers` -> 200, HTML confirmed to contain real seeded
+    customer names, "Add New User", table column headers, and the
+    "Seed data" badge text.
+  - `GET /customers/new` -> 200, HTML confirmed to contain all form
+    fields and "Save customer".
+  - `GET /customers/{realId}` -> 200, HTML confirmed to contain Customer
+    ID, Phone number, Call activity, Call history, Total calls, and "Not
+    available yet" (the AI-summary placeholder).
+  - `POST /api/customers` with a valid body -> 201, response body
+    inspected: server-generated `id` and `crmEntryCreatedAt` present and
+    correct shape.
+  - `POST /api/customers` with an empty body -> 400 with field-level
+    validation errors for `name`/`phoneNumber`.
+  - `POST /api/customers` with a client-supplied `id`/`crmEntryCreatedAt`
+    -> 201, and the response's actual `id`/`crmEntryCreatedAt` were
+    confirmed to be server-generated values, **not** the client-supplied
+    ones (the injection attempt was silently ignored, as intended, since
+    those fields aren't in the Zod schema at all).
+  - `POST /api/customers` with a phone number already in use -> 409,
+    with the existing customer's id in the response body.
+  - The newly created customer was confirmed to appear on `/customers`
+    (HTML re-fetched and grepped) and to render correctly at its own
+    `/customers/{id}` detail page -- this is the end-to-end confirmation
+    that the `globalThis` mock-store fix (above) actually works, not just
+    that it compiles.
+  - `PATCH /api/customers/{id}` with `{status, notes}` -> 200, response
+    confirmed the fields changed and `id` stayed the same.
+  - `PATCH /api/customers/{nonexistentId}` -> 404.
+  - `GET /api/customers/{nonexistentId}` -> 404.
+  - Server stopped after each test round; port 3000 confirmed free before
+    the next round.
+- **Not performed:** interactive/visual verification in an actual browser
+  (search-as-you-type, form inline-error rendering, hover states). No
+  browser automation was available/attempted this pass -- everything above
+  was verified via server-rendered HTML content and direct API calls, which
+  confirms the server-side logic and initial render are correct, but not
+  client-side interactivity itself. Flagged honestly rather than implied.
+
+**Actual results:**
+- A real, working CRM UI exists and was exercised end-to-end against its
+  own API, all backed by clearly-labeled mock data, exactly as instructed.
+  The database itself is designed and migration-ready but not connected --
+  blocked on the one missing `DATABASE_URL`, reported above rather than
+  worked around.
+
+**Incomplete / still requiring the next phase:**
+- `DATABASE_URL` still needed (Phase A) -- see above.
+- Swap `lib/customers/service.ts` from mock-store to Prisma once the
+  migration is applied.
+- No inline edit UI for an existing customer yet (the `PATCH` API exists
+  and is tested; no "Edit" button/form was built this pass -- not
+  explicitly requested for the UI, only the endpoint).
+- Search is client-side only over the already-fetched list; the API's
+  `?q=` server-side search parameter exists and works (usable once list
+  size makes client-side filtering impractical) but isn't wired to the UI
+  yet, since client-side is sufficient at demo scale.
+- `GET /customers/{badId}` 200-vs-404 status code (see "Known, verified,
+  not-yet-fixed issue" above).
+- No authentication anywhere yet (Phase 3, per `CRM_ARCHITECTURE.md`).
+- No Android integration (explicitly out of scope this pass).
+- Not pushed to GitHub, no Vercel project connected yet.
