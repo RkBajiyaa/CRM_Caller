@@ -1,0 +1,23 @@
+// Conbun CRM -- Prisma schema.
+//
+// Phase 1 (current): datasource + generator only, deliberately no models.
+// Business tables (customers, calls, etc.) are added starting Phase 2 --
+// see CRM_ARCHITECTURE.md #5-6, #15. Keeping this empty for now is
+// intentional, not an oversight.
+//
+// learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  // Generated into lib/, not app/, to keep app/ scoped to routes/pages
+  // per the frontend/backend folder boundary in CRM_ARCHITECTURE.md #3.
+  // This output is gitignored -- generated code, not authored code.
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // No `url` here deliberately -- Prisma 7 reads the connection string from
+  // prisma.config.ts (datasource.url -> process.env.DATABASE_URL), which is
+  // this project's single source of truth for the connection string.
+}
