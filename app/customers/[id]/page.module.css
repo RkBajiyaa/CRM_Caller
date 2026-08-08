@@ -1,6 +1,6 @@
 .layout {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 300px 1fr;
   gap: var(--space-6);
   align-items: start;
 }
@@ -18,32 +18,52 @@
 
 .profileHead {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  text-align: center;
-  gap: var(--space-3);
+  gap: var(--space-4);
   padding-bottom: var(--space-5);
   margin-bottom: var(--space-5);
   border-bottom: 1px solid var(--color-border);
 }
 
-.name {
-  font-size: 18px;
-  font-weight: 650;
-  color: var(--color-text);
-  margin-bottom: var(--space-2);
+.profileHeadText {
+  min-width: 0;
 }
 
-.fieldList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
+.name {
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phone {
+  display: block;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.phone:hover {
+  color: var(--color-accent-hover);
+}
+
+.statusRow {
+  margin-top: var(--space-2);
+}
+
+.fieldGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4) var(--space-3);
 }
 
 .field {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .fieldLabel {
@@ -55,7 +75,7 @@
 }
 
 .fieldValue {
-  font-size: 14px;
+  font-size: 13.5px;
   color: var(--color-text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -64,7 +84,7 @@
 
 .mono {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .notes {
@@ -96,7 +116,7 @@
 
 .statsGrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
 }
 

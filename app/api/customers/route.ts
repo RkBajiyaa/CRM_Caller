@@ -6,8 +6,8 @@ import { createCustomerSchema } from "@/lib/customers/validation";
 /**
  * GET /api/customers?q=<search>
  * Lists customers, optionally filtered by name/phone/id substring match.
- * Currently backed by mock data (lib/customers/mock-store.ts) -- see that
- * file's header. Response shape is what the real backend will return too.
+ * Backed by the real `customers` table on Neon Postgres via
+ * lib/customers/service.ts -> lib/customers/prisma-store.ts.
  */
 export async function GET(request: NextRequest) {
   const q = request.nextUrl.searchParams.get("q")?.trim().toLowerCase();

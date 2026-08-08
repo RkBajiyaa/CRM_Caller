@@ -8,38 +8,49 @@
 }
 
 .title {
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 650;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
   color: var(--color-text);
-}
-
-.subtitleRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: 4px;
 }
 
 .subtitle {
   font-size: 13px;
   color: var(--color-text-muted);
+  margin-top: 4px;
 }
 
 .actions {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
+}
+
+.searchWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 11px;
+  color: var(--color-text-subtle);
+  pointer-events: none;
 }
 
 .search {
   height: 38px;
-  width: 280px;
-  padding: 0 var(--space-3);
+  width: 240px;
+  padding: 0 var(--space-3) 0 34px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
-  font-size: 14px;
+  font-size: 13.5px;
+}
+
+.search::placeholder {
+  color: var(--color-text-subtle);
 }
 
 .search:focus {
@@ -56,32 +67,56 @@
   overflow: hidden;
 }
 
-.tableScroll {
-  overflow-x: auto;
+/* Fixed layout + percentage widths -- predictable, non-overflowing columns
+   on a normal desktop viewport instead of expanding to content width and
+   forcing horizontal scroll. Long values truncate with an ellipsis. */
+.table {
+  table-layout: fixed;
+  width: 100%;
 }
 
-.table {
-  min-width: 960px;
+.colCustomer {
+  width: 30%;
+}
+.colPhone {
+  width: 17%;
+}
+.colAgent {
+  width: 17%;
+}
+.colCalls {
+  width: 8%;
+}
+.colLastContact {
+  width: 14%;
+}
+.colStatus {
+  width: 10%;
+}
+.colActions {
+  width: 8%;
 }
 
 .table th {
   text-align: left;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
   color: var(--color-text-subtle);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--color-border);
-  white-space: nowrap;
 }
 
 .table td {
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--color-border);
-  font-size: 14px;
+  font-size: 13.5px;
   color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  vertical-align: middle;
 }
 
 .table tbody tr:last-child td {
@@ -92,17 +127,42 @@
   background: var(--color-bg);
 }
 
-.avatarCell {
-  width: 48px;
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.customerCell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.customerText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
 }
 
 .nameLink {
   font-weight: 600;
   color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.nameLink:hover {
+.customerCell:hover .nameLink {
   color: var(--color-accent-hover);
-  text-decoration: underline;
+}
+
+.customerMeta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-subtle);
 }
 
 .phoneLink {
@@ -114,12 +174,27 @@
   text-decoration: underline;
 }
 
-.idCell {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--color-text-subtle);
-}
-
 .muted {
   color: var(--color-text-muted);
+}
+
+.callsCell {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.actionsCell {
+  text-align: right;
+}
+
+.viewLink {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+}
+.viewLink:hover {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-hover);
 }

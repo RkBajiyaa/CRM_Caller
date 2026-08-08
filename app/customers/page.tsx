@@ -5,11 +5,11 @@ import { CustomersExplorer, type CustomerRow } from "@/components/crm/CustomersE
 
 export const metadata: Metadata = { title: "Customers -- Conbun CRM" };
 
-// This page reads mutable data (mock store today, a live database later --
-// see lib/customers/service.ts). Without this, Next.js's static analysis
-// would prerender it once at build time and serve that snapshot forever in
-// production, so a newly-added customer would never appear without a full
-// rebuild. Force per-request rendering instead.
+// This page reads live, mutable data from Postgres (lib/customers/service.ts).
+// Without this, Next.js's static analysis would prerender it once at build
+// time and serve that snapshot forever in production, so a newly-added
+// customer would never appear without a full rebuild. Force per-request
+// rendering instead.
 export const dynamic = "force-dynamic";
 
 // Server Component: fetches directly through the service layer (no

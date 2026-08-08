@@ -7,8 +7,8 @@ import { Avatar } from "@/components/crm/Avatar";
 import { StatusBadge } from "@/components/crm/StatusBadge";
 import { StatCard } from "@/components/crm/StatCard";
 import { CallHistoryTable } from "@/components/crm/CallHistoryTable";
-import { DemoDataBadge } from "@/components/crm/DemoDataBadge";
 import { Card, CardHeader } from "@/components/ui/Card";
+import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatDateTime, formatDuration } from "@/lib/format";
 import styles from "./page.module.css";
 
@@ -42,19 +42,23 @@ export default async function CustomerDetailPage({ params }: PageProps) {
         <Card className={styles.profileCard}>
           <div className={styles.profileHead}>
             <Avatar name={customer.name} size="lg" />
-            <div>
+            <div className={styles.profileHeadText}>
               <h2 className={styles.name}>{customer.name}</h2>
-              <StatusBadge status={customer.status} />
+              <a href={`tel:${customer.phoneNumber}`} className={styles.phone}>
+                {customer.phoneNumber}
+              </a>
+              <div className={styles.statusRow}>
+                <StatusBadge status={customer.status} />
+              </div>
             </div>
           </div>
 
-          <dl className={styles.fieldList}>
+          <dl className={styles.fieldGrid}>
             <ProfileField label="Customer ID" value={customer.id} mono />
-            <ProfileField label="Phone number" value={customer.phoneNumber} />
-            <ProfileField label="Location" value={customer.location ?? "--"} />
-            <ProfileField label="Account / application created" value={formatDate(customer.accountCreatedAt)} />
-            <ProfileField label="CRM entry date" value={formatDate(customer.crmEntryCreatedAt)} />
             <ProfileField label="Assigned agent" value={customer.assignedAgent ?? "Unassigned"} />
+            <ProfileField label="Location" value={customer.location ?? "--"} />
+            <ProfileField label="Account created" value={formatDate(customer.accountCreatedAt)} />
+            <ProfileField label="CRM entry date" value={formatDate(customer.crmEntryCreatedAt)} />
           </dl>
 
           {customer.notes && (
@@ -67,12 +71,11 @@ export default async function CustomerDetailPage({ params }: PageProps) {
 
         <div className={styles.mainColumn}>
           <Card>
-            <CardHeader title="Call activity" subtitle="Summary across all recorded calls" action={<DemoDataBadge kind="calls" />} />
+            <CardHeader title="Call activity" subtitle="Summary across all recorded calls" />
             <div className={styles.statsGrid}>
               <StatCard label="Total calls" value={stats.totalCalls} />
               <StatCard label="Answered" value={stats.answeredCalls} />
               <StatCard label="Missed" value={stats.missedCalls} />
-              <StatCard label="Incoming" value={stats.incomingCalls} />
               <StatCard label="Outgoing" value={stats.outgoingCalls} />
               <StatCard label="Total talk time" value={formatDuration(stats.totalConversationSeconds)} />
               <StatCard
@@ -85,7 +88,11 @@ export default async function CustomerDetailPage({ params }: PageProps) {
 
           <Card padded={false}>
             <div className={styles.historyHeader}>
-              <CardHeader title="Call history" subtitle="Each call links to its recording, transcript, and (later) AI summary" />
+              <CardHeader
+                title="Call history"
+                subtitle="Recording, transcript, and AI summary availability per call"
+                action={<Badge tone="accent">Sample data</Badge>}
+              />
             </div>
             <CallHistoryTable calls={calls} />
           </Card>

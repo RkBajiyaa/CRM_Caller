@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { TextField, SelectField, TextAreaField } from "@/components/ui/Field";
+import { TextField, SelectField } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { createCustomerRequest } from "@/lib/api-client/customers";
 import { CUSTOMER_STATUSES, type CustomerStatus } from "@/lib/customers/types";
@@ -13,9 +13,7 @@ interface FormState {
   phoneNumber: string;
   location: string;
   assignedAgent: string;
-  accountCreatedAt: string; // yyyy-mm-dd from <input type="date">
   status: CustomerStatus;
-  notes: string;
 }
 
 const INITIAL: FormState = {
@@ -23,9 +21,7 @@ const INITIAL: FormState = {
   phoneNumber: "",
   location: "",
   assignedAgent: "",
-  accountCreatedAt: "",
   status: "ACTIVE",
-  notes: "",
 };
 
 const STATUS_LABELS: Record<CustomerStatus, string> = {
@@ -36,11 +32,16 @@ const STATUS_LABELS: Record<CustomerStatus, string> = {
 };
 
 /**
- * Add New User form. Client-side checks below are for immediate feedback
- * only -- the API route re-validates everything server-side with the same
- * zod schema (lib/customers/validation.ts) and is the authoritative check.
- * `id`/`crmEntryCreatedAt` are never fields here -- the backend generates
- * both (CLAUDE.md rule #5).
+ * Add New User form -- deliberately just five fields (name, phone,
+ * location, assigned agent, status) for a fast, focused "add a customer"
+ * flow. Account creation date and notes exist in the data model/API for
+ * later (e.g. an edit screen) but aren't part of this form.
+ *
+ * Client-side checks below are for immediate feedback only -- the API
+ * route re-validates everything server-side with the same zod schema
+ * (lib/customers/validation.ts) and is the authoritative check. `id`/
+ * `crmEntryCreatedAt` are never fields here -- the backend generates both
+ * (CLAUDE.md rule #5).
  */
 export function CustomerForm() {
   const router = useRouter();
@@ -74,9 +75,7 @@ export function CustomerForm() {
       phoneNumber: form.phoneNumber.trim(),
       location: form.location.trim() || null,
       assignedAgent: form.assignedAgent.trim() || null,
-      accountCreatedAt: form.accountCreatedAt ? new Date(form.accountCreatedAt).toISOString() : null,
       status: form.status,
-      notes: form.notes.trim() || null,
     });
     setSubmitting(false);
 
@@ -94,25 +93,26 @@ export function CustomerForm() {
 
   return (
     <form className={styles.form} onSubmit={handleSubmit} noValidate>
-      <div className={styles.grid}>
-        <TextField
-          id="name"
-          label="Name"
-          required
-          value={form.name}
-          onChange={(e) => set("name", e.target.value)}
-          error={fieldErrors.name}
-          placeholder="e.g. Priya Sharma"
-        />
-        <TextField
-          id="phoneNumber"
-          label="Phone number"
-          required
-          value={form.phoneNumber}
-          onChange={(e) => set("phoneNumber", e.target.value)}
-          error={fieldErrors.phoneNumber}
-          placeholder="e.g. +91 98765 43210"
-        />
+      <TextField
+        id="name"
+        label="Name"
+        required
+        value={form.name}
+        onChange={(e) => set("name", e.target.value)}
+        error={fieldErrors.name}
+        placeholder="e.g. Priya Sharma"
+        autoFocus
+      />
+      <TextField
+        id="phoneNumber"
+        label="Phone number"
+        required
+        value={form.phoneNumber}
+        onChange={(e) => set("phoneNumber", e.target.value)}
+        error={fieldErrors.phoneNumber}
+        placeholder="e.g. +91 98765 43210"
+      />
+      <div className={styles.row}>
         <TextField
           id="location"
           label="Location"
@@ -125,38 +125,22 @@ export function CustomerForm() {
           label="Assigned agent"
           value={form.assignedAgent}
           onChange={(e) => set("assignedAgent", e.target.value)}
-          hint="Free text for now -- no agent directory yet."
+          hint="Free text for now"
           placeholder="e.g. Rahul Bajiya"
         />
-        <TextField
-          id="accountCreatedAt"
-          label="Account / application creation date"
-          type="date"
-          value={form.accountCreatedAt}
-          onChange={(e) => set("accountCreatedAt", e.target.value)}
-          hint="Optional. Separate from the CRM entry date, which is set automatically."
-        />
-        <SelectField
-          id="status"
-          label="Status"
-          value={form.status}
-          onChange={(e) => set("status", e.target.value as CustomerStatus)}
-        >
-          {CUSTOMER_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {STATUS_LABELS[s]}
-            </option>
-          ))}
-        </SelectField>
       </div>
-
-      <TextAreaField
-        id="notes"
-        label="Notes"
-        value={form.notes}
-        onChange={(e) => set("notes", e.target.value)}
-        placeholder="Optional context for whoever picks up this customer next."
-      />
+      <SelectField
+        id="status"
+        label="Status"
+        value={form.status}
+        onChange={(e) => set("status", e.target.value as CustomerStatus)}
+      >
+        {CUSTOMER_STATUSES.map((s) => (
+          <option key={s} value={s}>
+            {STATUS_LABELS[s]}
+          </option>
+        ))}
+      </SelectField>
 
       {formError && <p className={styles.formError}>{formError}</p>}
 

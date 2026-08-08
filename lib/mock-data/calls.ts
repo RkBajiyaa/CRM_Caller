@@ -20,8 +20,12 @@
  * AI summaries are explicitly out of scope this phase: every mock call's
  * `aiSummary` is `null`, and the UI renders a "not available yet"
  * placeholder for it rather than fabricating summary text.
+ *
+ * Generated purely from a customer id (deterministic PRNG seeded by the id
+ * string) rather than from a pre-built customer list -- customers now come
+ * from the real database (lib/customers/service.ts), so this file has no
+ * dependency on customer data at all and works for any id handed to it.
  */
-import { mockListCustomers } from "@/lib/customers/mock-store";
 
 export type CallDirection = "INCOMING" | "OUTGOING";
 export type CallOutcome = "ANSWERED" | "MISSED";
@@ -110,18 +114,18 @@ function generateCallsForCustomer(customerId: string, count: number): CallRecord
   return calls.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 }
 
-// Built once per process from the current mock customer list, so call
-// counts referenced on the Users table and the Detail page always agree.
-const callsByCustomer = new Map<string, CallRecord[]>(
-  mockListCustomers().map((customer) => {
-    const rand = mulberry32(hashString(customer.id));
-    const count = customer.status === "CLOSED" ? Math.floor(rand() * 3) : Math.floor(rand() * 9) + 1;
-    return [customer.id, generateCallsForCustomer(customer.id, count)];
-  })
-);
+// Small per-process cache so repeated lookups for the same customer within
+// one request/render don't regenerate (and re-sort) the same array twice.
+const cache = new Map<string, CallRecord[]>();
 
 export function getMockCallHistory(customerId: string): CallRecord[] {
-  return callsByCustomer.get(customerId) ?? [];
+  const cached = cache.get(customerId);
+  if (cached) return cached;
+  const rand = mulberry32(hashString(customerId));
+  const count = Math.floor(rand() * 9); // 0-8 calls, deterministic per id
+  const calls = generateCallsForCustomer(customerId, count);
+  cache.set(customerId, calls);
+  return calls;
 }
 
 export function getMockCallStats(customerId: string): CustomerCallStats {

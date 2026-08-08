@@ -782,3 +782,211 @@ eye):**
 - No authentication anywhere yet (Phase 3, per `CRM_ARCHITECTURE.md`).
 - No Android integration (explicitly out of scope this pass).
 - Not pushed to GitHub, no Vercel project connected yet.
+
+---
+
+## 2026-08-08 — Connected to the real Neon database + full UI redesign
+
+User confirmed the Neon connection string was placed in `.env` and the
+initial migration applied, then asked to (1) move the customers API off
+the mock store onto Prisma/Neon and (2) redesign the CRM UI for a more
+professional, denser, less-scrolly look -- in one implementation pass, no
+separate planning turn.
+
+### 1. Real database connection
+
+**`DATABASE_URL` was checked first (structurally only -- never printed) to
+confirm it held a real value before touching anything.** It did. **Its
+value has not been printed, logged, or committed anywhere in this session.**
+
+**Files created:**
+- `lib/customers/prisma-store.ts` -- the real persistence layer. Implements
+  the same five functions the mock store did (`dbListCustomers`,
+  `dbGetCustomerById`, `dbFindCustomerByPhoneNumber`, `dbCreateCustomer`,
+  `dbUpdateCustomer`), backed by `prisma.customer.*` via the existing
+  `lib/db/prisma.ts` singleton. A `toDomain()` mapper converts Prisma's
+  `Date` fields to the ISO strings `lib/customers/types.ts` expects.
+  `dbCreateCustomer` never sets `id`/`crmEntryCreatedAt` -- the schema's
+  `@default(uuid())`/`@default(now())` generate them, same rule as before,
+  now enforced at the database level instead of just in application code.
+  `dbUpdateCustomer` catches Prisma's `P2025` ("record not found") and
+  returns `null`, matching the existing "not found" contract instead of
+  leaking a Prisma-specific error type to callers.
+
+**Files modified:**
+- `lib/customers/service.ts` -- now imports from `prisma-store.ts` instead
+  of `mock-store.ts`. This was the one-file swap `CRM_ARCHITECTURE.md`
+  always described; no API route or page needed to change.
+- `lib/mock-data/calls.ts` -- its only import was `mockListCustomers` from
+  the now-deleted mock store (used to pre-build a per-customer call-count
+  map). Rewritten to generate call history for any customer id on demand
+  (same deterministic per-id PRNG, just no longer needs a customer list
+  up front) -- decouples mock call data from customer data entirely, which
+  is also just more correct: it no longer needs to enumerate every
+  customer to compute one customer's stats.
+- `app/api/customers/route.ts` -- doc comment updated (no longer describes
+  itself as mock-backed).
+
+**Files deleted:**
+- `lib/customers/mock-store.ts` -- removed from the codebase entirely, not
+  just unwired, per instruction not to keep fake customer data around
+  pretending to be production data.
+
+**Tests/builds performed (all actually run against the live database):**
+- `npx prisma validate` -- passed.
+- `npm run build` -- clean.
+- **Full persistence test, exactly as requested, against the real Neon
+  database:**
+  1. `POST /api/customers` -- created "Persistence Test Customer" -> 201,
+     server-generated `id`/`crmEntryCreatedAt` confirmed present.
+  2. Confirmed it appeared in `GET /api/customers` and on the rendered
+     `/customers` page HTML.
+  3. **Restarted the dev server completely** (killed the process, `ss
+     -ltnp` confirmed port 3000 free, started fresh).
+  4. `GET /api/customers/{id}` after restart -> 200, identical record --
+     **this is the real proof of persistence**, not just that the API
+     compiles: an in-memory store would have reset to empty on this
+     restart, and it didn't.
+  5. `PATCH /api/customers/{id}` -- changed `status`/`notes`.
+  6. Re-fetched -- confirmed the change persisted, `updatedAt` advanced
+     past `createdAt` (Prisma's `@updatedAt` working correctly), `id`
+     unchanged.
+  7. **Removed the temporary test record** via `prisma db execute --stdin`
+     (a one-off `DELETE FROM customers WHERE customer_id = '...'`) rather
+     than adding a permanent `DELETE` API route -- not requested, and
+     customer deletion (soft vs. hard delete, who's allowed) is a real
+     product decision better made deliberately later, not smuggled in as
+     a side effect of test cleanup. Confirmed removed (404 afterward,
+     `GET /api/customers` back to `{"data":[]}`).
+- Repeated the same create -> restart -> update -> cleanup sequence again
+  after the UI redesign (below), against the redesigned pages this time,
+  to confirm the new UI reads/writes the same real data -- see that
+  section's Tests for the exact record.
+
+**Actual results:**
+- The CRM Users page, Add New User, Customer Detail, and all four
+  `/api/customers*` endpoints now read and write the real `customers`
+  table on Neon Postgres. No mock customer data exists anywhere in the
+  running app. Verified by surviving a full process restart, not assumed.
+
+### 2. UI redesign
+
+Scope: visual/layout redesign only, no architecture changes, per
+instruction. Same pages, same API, same data layer -- different
+components/CSS.
+
+**Files modified:**
+- `components/crm/CustomersExplorer.tsx`/`.module.css` -- column set cut
+  from 10 columns to 7 (**Customer, Phone, Agent, Calls, Last contact,
+  Status, Actions**), matching the requested priority list exactly.
+  `Customer ID` moved into a small monospace secondary line under the name
+  (plus a `title` tooltip with the full id); `location`/`CRM entry date`
+  moved to the detail page only (still searchable via the search box,
+  just not shown as columns). Search box got a leading icon. Table switched
+  from `min-width: 960px` (which forced horizontal scroll on normal
+  screens) to `table-layout: fixed` with percentage column widths, so it
+  fits the content width and never needs horizontal scroll on a normal
+  desktop viewport -- this was the specific complaint, verified fixed (see
+  Tests). Added an explicit "Actions" column (a "View" link) since it was
+  requested as a column even though name/phone already link to the detail
+  page.
+- `components/crm/CallHistoryTable.tsx`/`.module.css` -- per instruction
+  not to invent recordings/transcripts/AI summaries, the Recording/
+  Transcript/AI-summary columns now show **availability badges**
+  ("Available" / "None" / "Not available yet") instead of the previous
+  version's fabricated transcript sentence displayed as if it were real
+  call content. AI summary is always "Not available yet" (unchanged --
+  that feature still doesn't exist). Also switched to `table-layout:
+  fixed` with percentage widths, same horizontal-scroll fix as above.
+- `app/customers/[id]/page.tsx`/`page.module.css` -- profile header
+  redesigned (avatar + name + click-to-call phone number + status badge,
+  left-aligned instead of centered); profile fields moved from a single
+  stacked list into a denser 2-column grid; call-activity stats grid
+  changed from 7 cards to the requested 6 (**Total calls, Answered,
+  Missed, Outgoing, Total talk time, Last contacted** -- dropped
+  "Incoming", not in the requested list); the "mock data" indicator moved
+  from a "Seed data" badge on the whole page (customers are real now) to a
+  single "Sample data" badge scoped to just the Call history card, since
+  that's the only remaining mock data on this page.
+- `components/crm/CustomerForm.tsx`/`.module.css` -- cut from 7 fields to
+  the requested 5 (**Name, Phone number, Location, Assigned agent,
+  Status**); "Account/application creation date" and "Notes" removed from
+  this form (the underlying data model/API still support both, for a
+  future edit screen -- they just aren't part of *this* fast add-a-
+  customer flow). Location/Assigned agent now sit side-by-side in a
+  2-column row instead of stacking full-width.
+- `app/customers/new/page.tsx` + new `page.module.css` -- form card capped
+  at 560px wide instead of stretching the full content width, which reads
+  much more like a focused, professional "add record" form.
+- `app/customers/page.tsx` -- stale comment fixed (no longer describes
+  itself as mock-backed).
+
+**Files deleted:**
+- `components/crm/DemoDataBadge.tsx` -- its only two use sites were
+  removed above (customers are real, and the one remaining mock-data
+  badge is now an inline `<Badge tone="accent">Sample data</Badge>`, not
+  worth a dedicated component for a single remaining call site).
+
+**Design decisions (not asked to justify individually, noted for the
+record):** kept the plain-CSS-Modules approach from Phase B rather than
+adding a component library, per "do not redesign the entire architecture"
+and "no unnecessary dependencies" (still standing rules); accent orange
+usage reduced to genuinely interactive/status moments (active nav item,
+links on hover, primary button, badges) rather than decorative use, per
+"use the accent intelligently"; no new animations added beyond the
+existing table-skeleton pulse from Phase B.
+
+**Tests/builds performed:**
+- `npm run lint` -- clean.
+- `npm run build` -- clean, all 7 routes, same shape as before (redesign
+  didn't change routing). One build run was slow (~5 min) because a stray
+  `next dev` process from the earlier persistence test was still running
+  and contending with `next build` over the `.next/` directory -- not a
+  code issue; killed the stray process and reran, back to ~1s compile /
+  ~6s typecheck.
+- `npx prisma validate` -- clean.
+- **Live re-verification against the real database, against the
+  redesigned pages specifically:** created "Redesign QA Customer" via
+  `POST /api/customers`, confirmed it rendered on the redesigned
+  `/customers` table (new column headers confirmed present: Customer,
+  Phone, Agent, Calls, Last contact, Status) and the redesigned
+  `/customers/{id}` detail page (profile fields, exactly 6 stat-card
+  labels confirmed by grepping the actual rendered `StatCard` label
+  markup -- not just eyeballing "Incoming" appearing anywhere on the page,
+  since it also legitimately appears as a per-call Direction value in the
+  history table), `PATCH`'d its status, confirmed the change, then removed
+  it the same way as the Phase-A test record (`prisma db execute`).
+- Confirmed the Add New User page's rendered HTML no longer contains
+  `id="notes"` or `id="accountCreatedAt"` form fields.
+- Confirmed the empty state ("No customers yet") renders correctly once
+  the test record was cleaned up -- **one transient miss noted and
+  investigated**: the very first fetch immediately after the `prisma db
+  execute` DELETE returned a response without the empty-state text (RSC
+  streaming payload only, page content not yet resolved in that
+  particular response); three immediate repeat fetches afterward were all
+  byte-identical and correct. Treated as a one-off timing artifact of
+  hitting the app right as a separate short-lived Prisma connection (the
+  CLI's) released, not a reproducible bug -- flagged here rather than
+  silently ignored, but not chased further given it didn't reproduce.
+
+**Actual results:**
+- Both parts done and verified live, not just built: real Neon persistence
+  survives a restart, and the redesigned Customers/Detail/Add-New-User
+  pages render the new layout against real data with the new column set,
+  no forced horizontal scroll, and no fabricated call content.
+
+**Incomplete / still requiring the next phase:**
+- `?q=` server-side search still unused by the UI (client-side search is
+  sufficient at current scale) -- unchanged from the prior entry.
+- `GET /customers/{badId}` 200-vs-404 status code -- unchanged, still not
+  fixed (see prior entry's explanation; nothing about the redesign
+  affected this).
+- No authentication, no Android integration, no AI summaries -- all still
+  explicitly out of scope, unchanged.
+- No edit-customer UI (the `PATCH` endpoint is tested and works; no "Edit"
+  button exists in the redesigned detail page -- not requested this pass).
+- Call history / recordings / transcripts / AI summaries are still 100%
+  mock (`lib/mock-data/calls.ts`), clearly labeled via the "Sample data"
+  badge on the Customer Detail page -- no `Call` table exists, per
+  instruction not to create unnecessary future tables.
+- Not pushed to GitHub, no Vercel project connected yet.
