@@ -140,6 +140,69 @@ always needs both):
 }
 ```
 
+## Call requests — CRM "Call" button → Android pending-request queue
+
+A request is created when an agent clicks **Call** on a customer row in
+the CRM. It always starts as `PENDING`, is keyed by `customerId` (never
+phone number), and carries a snapshot of `phoneNumber`/`customerName` so
+Android doesn't need a second lookup to dial. Android polls for pending
+requests, accepts one, places the real call (`POST /api/calls`, see
+below — pass `callRequestId` there to link the two), then updates the
+request's status.
+
+```
+CRM:      [Call button] -> POST /api/call-requests -> Neon, status PENDING
+Android:  GET /api/call-requests?status=PENDING -> PATCH .../{id} {"status":"ACCEPTED"}
+          -> place the real call -> POST /api/calls {..., "callRequestId": "..."}
+          -> PATCH /api/call-requests/{id} {"status":"COMPLETED"}
+```
+
+### `POST /api/call-requests`
+
+```json
+// Request -- only customerId, from the CRM's Call button
+{ "customerId": "..." }
+
+// 201 response
+{
+  "data": {
+    "id": "...", "customerId": "...", "phoneNumber": "+91 98765 43210",
+    "customerName": "Priya Sharma", "status": "PENDING", "callId": null,
+    "requestedAt": "...", "updatedAt": "..."
+  }
+}
+```
+
+`404` if `customerId` doesn't match a real customer.
+
+### `GET /api/call-requests?status=PENDING`
+
+This is Android's polling endpoint. `status` optional — one of
+`PENDING`/`ACCEPTED`/`COMPLETED`/`CANCELLED`/`FAILED`; omit to list all.
+Oldest request first. Response shape: `{ "data": [ <request>, ... ] }`
+(same shape as the `POST` response's `data`).
+
+### `GET /api/call-requests/{id}`
+
+Returns one request, or `404`.
+
+### `PATCH /api/call-requests/{id}`
+
+```json
+// Accept:
+{ "status": "ACCEPTED" }
+
+// Finish (callId is set automatically by POST /api/calls if you passed
+// callRequestId there -- setting it here directly is also supported,
+// e.g. for correcting a link):
+{ "status": "COMPLETED", "callId": "..." }
+```
+
+`status` ∈ `PENDING`/`ACCEPTED`/`COMPLETED`/`CANCELLED`/`FAILED`
+(`PENDING` is only ever set by the backend at creation — sending it here
+is accepted but pointless, there's no "un-accept"). `404` if the request
+doesn't exist.
+
 ## Calls
 
 A call always belongs to a customer via `customerId` — never resolved from
@@ -149,7 +212,7 @@ A call always belongs to a customer via `customerId` — never resolved from
 
 ```json
 // Request
-{ "customerId": "...", "phoneNumber": "+91 98765 43210", "direction": "OUTGOING", "agentId": null, "startedAt": null }
+{ "customerId": "...", "phoneNumber": "+91 98765 43210", "direction": "OUTGOING", "agentId": null, "startedAt": null, "callRequestId": null }
 ```
 
 `customerId` must already exist (`404` otherwise — resolve/create the
@@ -157,6 +220,13 @@ customer first, e.g. via `GET /api/customers/lookup` then `POST
 /api/customers`). `direction` is `INCOMING` or `OUTGOING`. Returns `201`
 with the call; `status` is `null` (not yet known — see schema comment on
 `Call.status`).
+
+`callRequestId` is **optional** — when the call fulfills a CRM-created
+call request, pass its id here and the backend links
+`CallRequest.callId` to the new call as a side effect (best-effort: an
+unknown `callRequestId` doesn't fail call creation, it's just not
+linked). Omit it entirely for calls that didn't originate from a request
+— nothing else about this endpoint changes.
 
 ### `PATCH /api/calls/{id}` — finish a call
 

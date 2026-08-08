@@ -92,25 +92,25 @@
 }
 
 .colCustomer {
-  width: 30%;
+  width: 28%;
 }
 .colPhone {
-  width: 17%;
+  width: 16%;
 }
 .colAgent {
-  width: 17%;
-}
-.colCalls {
-  width: 8%;
-}
-.colLastContact {
   width: 14%;
 }
+.colCalls {
+  width: 7%;
+}
+.colLastContact {
+  width: 12%;
+}
 .colStatus {
-  width: 10%;
+  width: 9%;
 }
 .colActions {
-  width: 8%;
+  width: 14%;
 }
 
 .table th {
@@ -200,7 +200,12 @@
 }
 
 .actionsCell {
-  text-align: right;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .viewLink {

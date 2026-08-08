@@ -51,7 +51,23 @@ export async function getCallById(id: string): Promise<Call | null> {
   return row ? toDomain(row) : null;
 }
 
-/** POST /api/calls -- "start" a call. `status` is left null (not yet known) until "finish" (updateCall). */
+/**
+ * POST /api/calls -- "start" a call. `status` is left null (not yet
+ * known) until "finish" (updateCall).
+ *
+ * If `callRequestId` is present (Android fulfilling a CRM-created
+ * CallRequest), links that request's `callId` to the new call as a
+ * second, separate write -- not wrapped in a `$transaction`, since this
+ * environment's Neon adapter can't open the WebSocket session Prisma's
+ * interactive transactions need (see lib/customers/prisma-store.ts's
+ * comment). Two plain sequential writes is the correct fix here anyway,
+ * not just a workaround: the call itself must exist regardless of
+ * whether the (optional, best-effort) link succeeds. If `callRequestId`
+ * doesn't match a real request, the link is silently skipped -- it
+ * doesn't fail call creation, since the call was still started
+ * successfully and Android can retry the link separately via
+ * `PATCH /api/call-requests/{id}`.
+ */
 export async function startCall(input: StartCallInput): Promise<Call> {
   const row = await prisma.call.create({
     data: {
@@ -63,6 +79,22 @@ export async function startCall(input: StartCallInput): Promise<Call> {
     },
     ...callWithRelations,
   });
+
+  if (input.callRequestId) {
+    try {
+      await prisma.callRequest.update({
+        where: { id: input.callRequestId },
+        data: { callId: row.id },
+      });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025")) {
+        throw error;
+      }
+      // callRequestId didn't match a real request -- the call itself was
+      // still created successfully; the link is best-effort, not required.
+    }
+  }
+
   return toDomain(row);
 }
 

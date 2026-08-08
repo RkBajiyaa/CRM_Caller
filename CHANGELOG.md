@@ -1356,3 +1356,192 @@ and backend-verified, but not exercised from an actual device).
   but the Customer Detail page's UI only shows availability badges, not
   every individual AI-summary field (`keyPoints`, `sentiment`, etc.) --
   flagged in `CRM_ARCHITECTURE.md` §14 item 9.
+
+---
+
+## 2026-08-09 — Call-request queue: CRM "Call" button → Android pending-request flow + test customers
+
+Narrow, explicitly-scoped pass: **only** the call-request flow (CRM button
+→ `PENDING` row in Neon → Android polls/accepts/fulfills) plus test data.
+No UI redesign, no auth changes, no unrelated features -- per explicit
+instruction. The existing Customer/Call/Transcript architecture was not
+touched except the one additive field noted below.
+
+**A transient interruption happened mid-task** (background `prisma
+migrate dev` failed with `P1017`/ENOTIMP -- a real network drop, not a
+code issue). Recovered correctly: re-checked `git status` and
+`prisma/migrations/` before doing anything else, confirmed no partial
+migration had been written and `prisma/schema.prisma`'s edits (already
+made pre-interruption) were exactly as left, then retried
+`prisma migrate dev` once connectivity was confirmed restored via
+`prisma migrate status`. Nothing was redone or reverted.
+
+**Also noted, not acted on:** `ConbunCall_V4/di/AppContainer.kt` now
+contains `CallStateObserver`/`CallSessionTracker` imports this session
+didn't add -- someone else is evidently already working on the Android
+side. Left completely untouched, per this pass's explicit CRM-only scope;
+flagged here so it isn't mistaken for something this session did.
+
+### Database
+
+**One migration**, purely additive, applied to the real Neon database
+(confirmed by reading the generated SQL before trusting it -- one
+`CREATE TYPE`, one `CREATE TABLE`, indexes, two `ADD CONSTRAINT`, no
+`DROP`/destructive `ALTER` anywhere):
+`20260808190653_add_call_requests` -- new `CallRequestStatus` enum
+(`PENDING`/`ACCEPTED`/`COMPLETED`/`CANCELLED`/`FAILED`) and `CallRequest`
+model: `id`, `customerId` (FK, required -- never phone number, CLAUDE.md
+rule #1), `phoneNumber`/`customerName` (snapshotted at request time),
+`status` (default `PENDING`), `callId` (nullable, `@unique` FK to `Call`
+-- set once Android reports the real call), `requestedAt`, `updatedAt`.
+Also added a reverse `callRequest CallRequest?` relation field on `Call`
+and `callRequests CallRequest[]` on `Customer` -- both relation-only,
+zero new columns on those tables' own data.
+
+**Note:** `prisma migrate status`/`migrate dev` briefly returned `P1001`
+("can't reach database server") on the very first attempt this session,
+before any of the interruption above -- resolved by simply retrying a few
+seconds later. This is Neon's normal free-tier compute
+auto-suspend/auto-wake behavior (the direct-TCP connection Prisma's CLI
+uses is what triggers the wake, unlike the app's own HTTP/WebSocket
+adapter which appears to wake it transparently) -- not a bug, not
+investigated further, just noted for future sessions so it isn't mistaken
+for a real outage.
+
+**Existing data:** the real customer created directly through the CRM UI
+was present before this pass and confirmed still present, unmodified,
+after it (verified via the API, by name, post-seeding).
+
+### Backend
+
+**Files created:** `lib/call-requests/types.ts`, `validation.ts`,
+`service.ts` (`createCallRequest` -- snapshots `phoneNumber`/`name` from
+the real customer row, 404s if `customerId` doesn't resolve;
+`listCallRequests(status?)`; `getCallRequestById`; `updateCallRequest` --
+find-then-update, not `upsert()`, same established reason as every other
+service in this codebase), `app/api/call-requests/route.ts` (`POST`
+create, `GET` list with optional `?status=`), `app/api/call-requests/[id]/route.ts`
+(`GET` one, `PATCH` update), `lib/api-client/call-requests.ts` (browser
+fetch wrapper for the CRM button), `components/crm/CallRequestButton.tsx`
++ `.module.css`.
+
+**Files modified (additive only):** `lib/calls/types.ts` (`StartCallInput`
+gained an optional `callRequestId`), `lib/calls/service.ts` (`startCall`
+now does a second, separate, best-effort write linking
+`CallRequest.callId` to the new call when `callRequestId` is passed --
+not wrapped in a `$transaction`, per this environment's already-documented
+Neon/WebSocket limitation, and deliberately non-fatal if the id doesn't
+resolve, since the call itself must still be created either way),
+`lib/calls/validation.ts` (schema gained the same optional field).
+`app/api/calls/route.ts` needed **no changes** -- it already passes
+`parsed.data` straight through. Every existing required field, response
+shape, and status code for `POST`/`PATCH /api/calls` is unchanged; a
+caller that never sends `callRequestId` sees no difference at all.
+`app/api/calls/[id]/transcript/route.ts` -- **not touched.** Re-verified
+live (see Testing) that `POST /api/calls/{id}/transcript` still works
+exactly as before.
+
+**All new/modified routes call `requireAuth()`** (existing auth
+middleware/helper, not a new mechanism -- per instruction not to add
+authentication, this reuses what already existed).
+
+### CRM UI (minimal, additive)
+
+**Files modified:** `components/crm/CustomersExplorer.tsx` -- added
+`<CallRequestButton customerId={row.id} />` next to the existing "View"
+link in the Actions column. **"View" was not removed.** Column widths
+(`CustomersExplorer.module.css`) nudged slightly (Agent 17%→14%, Last
+contact 14%→12%, Actions 8%→14%) so both controls fit without wrapping;
+no other layout/visual change. `CallRequestButton` posts to
+`/api/call-requests` and locks to a disabled "Requested" label on success
+(a fresh page load resets it) so an accidental double-click can't queue
+duplicate `PENDING` requests for the same customer -- the only UI/UX
+decision made in this pass beyond "add the button."
+
+**Nothing else in the UI was touched.** Customer Detail page, Add New
+User, Agents page, login, sidebar -- all exactly as they were.
+
+### Test data (development/test only, clearly marked three independent ways)
+
+**File created:** `prisma/seed-test-customers.ts` (+ `npm run
+db:seed-test-customers`, `dotenv/config` imported explicitly since this
+script runs standalone via `tsx`, not through the Prisma CLI which would
+have loaded it via `prisma.config.ts`). Idempotent (find-by-phone-number
+before creating, safe to re-run -- confirmed by actually running it
+twice, see Testing).
+
+**Creates 28 obviously-fictional customers**, each marked as test data
+three independent ways: name prefixed `"(Test) "` (visible in every
+list/table), phone number in a reserved sequential `+91 90000 000XX`
+block (no real customer would have a sequentially-numbered phone number),
+and `notes` explicitly stating `"Development/test customer -- safe to
+delete. Not a real customer."` Varied across all 4 `CustomerStatus`
+values, 10 Rajasthan cities, and assignment across 2 new test `Agent`
+accounts (`Test Agent - Neha Verma`, `Test Agent - Amit Rathore` --
+dev-only credentials, documented the same non-secret way as the existing
+`admin@conbun.dev` seed) plus the real dev admin plus unassigned, so
+"assigned agent" has real variety to test/filter/search against. **No
+fake call history was created** -- these are customer records only; any
+call history they accumulate going forward (e.g. from the CALL-button
+test below) is real, created through the real API, not fabricated.
+
+### Testing (all actually run, against the real Neon database)
+
+- `npm run lint` / `npm run build` -- clean, both checked twice (once
+  right after the button/API code, once again after seeding + the full
+  live flow test below). New routes confirmed in the build's route list:
+  `/api/call-requests`, `/api/call-requests/[id]`.
+- `npx prisma validate` / `npx prisma migrate status` -- clean.
+- `npm run db:seed-test-customers` run **twice**: first run -- "Created:
+  28, already present (skipped): 0"; second run -- "Created: 0, already
+  present (skipped): 28" -- confirmed idempotent, not just assumed.
+- `GET /api/customers?pageSize=100` (authenticated) -- confirmed `total:
+  29` (1 real + 28 test), confirmed by name that the real `"dff"`
+  customer is still present, confirmed 28 `(Test)`-prefixed rows exist.
+- `GET /customers` (the actual CRM page, real session cookie) -- confirmed
+  the rendered HTML contains real test customer names, the real customer,
+  and both "Call" and "View" in the same row.
+- **Full call-request lifecycle, exactly the 8 numbered checks requested,
+  all via real HTTP requests against the live database:**
+  1. Opened `/customers` (rendered, confirmed above).
+  2. Confirmed test customers visible (confirmed above).
+  3. `POST /api/call-requests` (the "Call" button's actual request) for a
+     real test customer -- `201`.
+  4. Response body inspected: real `id`, correct `customerId`/
+     `phoneNumber`/`customerName` snapshot.
+  5. `status: "PENDING"` confirmed in that same response.
+  6. `GET /api/call-requests?status=PENDING` -- confirmed the new request
+     appears in the list.
+  7. `PATCH /api/call-requests/{id}` `{"status":"ACCEPTED"}` -- confirmed
+     `200`, status changed, and the request no longer appears under
+     `?status=PENDING` afterward (re-queried to confirm, not assumed).
+  8. `POST /api/calls` with `callRequestId` set -- confirmed `201`, then
+     `GET /api/call-requests/{id}` confirmed `callId` was auto-linked and
+     matches the real call's id exactly.
+  - Continued past the 8 requested checks to close the loop for real:
+    `PATCH /api/calls/{id}` (finish, `ANSWERED`, 95s) -- `200`; `PATCH
+    /api/call-requests/{id}` `{"status":"COMPLETED"}` -- `200`, final
+    state inspected (`status: "COMPLETED"`, `callId` still correctly
+    linked).
+  - `POST /api/calls/{id}/transcript` on that same call, immediately
+    after -- `201`, `processingStatus: "DONE"` -- confirms the existing
+    transcript endpoint is genuinely unaffected by any of the above.
+- Server stopped after testing (`kill`, confirmed port 3000 free); the
+  completed test call/request/transcript above were left in place (tied
+  to an already-clearly-marked test customer) as a real, inspectable
+  example in the CRM rather than deleted -- not presented as real data,
+  since the customer it belongs to is unambiguously marked as test data
+  by all three markers above.
+
+### Incomplete / still requiring the next phase
+
+- No Android Kotlin code was added for the call-request queue itself
+  (polling/accept/fulfill) -- backend-only this pass, per scope. See
+  `ANDROID_API_INTEGRATION.md`'s new "Call request queue" section for the
+  exact intended flow and contract, ready to implement against.
+- Someone appears to be independently adding `CallStateObserver`/
+  `CallSessionTracker` to `ConbunCall_V4` -- noted, not investigated, not
+  touched.
+- Everything else noted as incomplete in the prior entry (object storage,
+  AI provider, GitHub/Vercel deployment, `GET /customers/{badId}`
+  200-vs-404) is unchanged.

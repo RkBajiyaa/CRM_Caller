@@ -76,6 +76,19 @@ enum ActionStatus {
   CANCELLED
 }
 
+/// CRM -> Android call-request lifecycle. PENDING is always the initial
+/// value (backend-generated, never client-chosen); Android moves it to
+/// ACCEPTED when it picks the request up, then to a terminal state once
+/// the phone call itself is done. Kept small and flat on purpose, same
+/// spirit as ActionStatus -- no sub-states, no workflow engine.
+enum CallRequestStatus {
+  PENDING
+  ACCEPTED
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
 // ============================================================================
 // Agents (auth identity + CRM/Android user)
 // ============================================================================
@@ -154,8 +167,9 @@ model Customer {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  calls   Call[]
-  actions Action[]
+  calls        Call[]
+  actions      Action[]
+  callRequests CallRequest[]
 
   @@index([assignedAgentId])
   @@index([status])
@@ -198,15 +212,57 @@ model Call {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  recording  Recording?
-  transcript Transcript?
-  aiSummary  AiSummary?
-  actions    Action[]
+  recording   Recording?
+  transcript  Transcript?
+  aiSummary   AiSummary?
+  actions     Action[]
+  /// The CRM-created request this call fulfills, if any -- set via
+  /// POST /api/calls's optional `callRequestId`, not required (a call can
+  /// still be reported without ever having gone through a CallRequest).
+  callRequest CallRequest?
 
   @@index([customerId])
   @@index([agentId])
   @@index([startedAt])
   @@map("calls")
+}
+
+// ============================================================================
+// Call requests -- CRM "CALL" button -> Android pending-request queue
+// ============================================================================
+
+/// Created when an agent clicks "Call" in the CRM. Android polls for
+/// PENDING requests, accepts one, places the real phone call, then
+/// updates the status -- the actual call is reported separately via the
+/// existing POST /api/calls (optionally passing this request's id back to
+/// link the two, see Call.callRequest above). Always keyed by
+/// `customerId`, never by phone number (CLAUDE.md rule #1); `phoneNumber`/
+/// `customerName` below are point-in-time snapshots for Android's
+/// convenience (so it doesn't need a second lookup to dial), not a second
+/// source of truth -- the customer's current data is always the row this
+/// points at via `customerId`.
+model CallRequest {
+  id         String   @id @default(uuid()) @map("call_request_id")
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  phoneNumber  String @map("phone_number")
+  customerName String @map("customer_name")
+
+  status CallRequestStatus @default(PENDING)
+
+  /// Set once Android has created the real Call for this request (via
+  /// POST /api/calls's optional `callRequestId`). Unique: one call
+  /// request is fulfilled by at most one call.
+  callId String? @unique @map("call_id")
+  call   Call?   @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  requestedAt DateTime @default(now()) @map("requested_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([customerId])
+  @@index([status])
+  @@map("call_requests")
 }
 
 // ============================================================================

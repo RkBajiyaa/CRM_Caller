@@ -8,6 +8,7 @@ import type { Agent } from "@/lib/agents/types";
 import { Avatar } from "@/components/crm/Avatar";
 import { StatusBadge } from "@/components/crm/StatusBadge";
 import { StateMessage } from "@/components/crm/StateMessage";
+import { CallRequestButton } from "@/components/crm/CallRequestButton";
 import { LinkButton } from "@/components/ui/Button";
 import { formatDate, shortId } from "@/lib/format";
 import { CUSTOMER_STATUSES } from "@/lib/customers/types";
@@ -196,6 +197,7 @@ export function CustomersExplorer({
                       <StatusBadge status={row.status} />
                     </td>
                     <td className={styles.actionsCell}>
+                      <CallRequestButton customerId={row.id} />
                       <Link href={`/customers/${row.id}`} className={styles.viewLink}>
                         View
                       </Link>

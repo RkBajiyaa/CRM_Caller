@@ -25,13 +25,21 @@ export interface Call {
   aiSummaryStatus: string | null;
 }
 
-/** POST /api/calls -- "start" a call. customerId is required (CLAUDE.md rule #1: never phone number as the relationship). */
+/**
+ * POST /api/calls -- "start" a call. customerId is required (CLAUDE.md
+ * rule #1: never phone number as the relationship). `callRequestId` is
+ * optional -- when present (Android fulfilling a CRM-created
+ * CallRequest), the matching request's `callId` is linked to the new call
+ * as a side effect; omitting it is unaffected/unchanged, existing callers
+ * that don't know about CallRequest keep working exactly as before.
+ */
 export interface StartCallInput {
   customerId: string;
   phoneNumber: string;
   direction: CallDirection;
   agentId?: string | null;
   startedAt?: string;
+  callRequestId?: string | null;
 }
 
 /** PATCH /api/calls/{id} -- "finish" a call, or amend any of these fields. */

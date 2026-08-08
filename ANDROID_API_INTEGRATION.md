@@ -60,6 +60,34 @@ the full record.
   are untouched and remain the source of the text this backend's
   `/transcript` and `/summary` endpoints are designed to receive.
 
+## Call request queue (CRM "Call" button)
+
+New this pass, backend-only (no Android code changed for this specific
+part — `BackendRepository`/`BackendApiService` don't have call-request
+methods yet, since nothing on the Android side consumes them today). The
+CRM's Customers page now has a **Call** button per row; clicking it
+creates a `PENDING` call request in Neon via `POST /api/call-requests`.
+The intended Android-side flow, not yet implemented in Kotlin:
+
+```
+GET /api/call-requests?status=PENDING   -- poll
+PATCH /api/call-requests/{id}            {"status":"ACCEPTED"}
+  -- place the real call --
+POST /api/calls                           {..., "callRequestId": "<id>"}
+PATCH /api/calls/{id}                      -- finish, as before
+PATCH /api/call-requests/{id}            {"status":"COMPLETED"}
+```
+
+Full contract, request/response examples, and status vocabulary:
+`API_DOCUMENTATION.md` § "Call requests". **Verified backend-side only**
+this pass (`curl`, against the real database, full lifecycle including
+the `callRequestId` link — see `CHANGELOG.md`) — adding
+`lookupPendingCallRequests`/`acceptCallRequest`/etc. to
+`BackendRepository` and a polling call site (e.g. a periodic `WorkManager`
+job, matching the existing `TranscriptionWorkScheduler`/`CrmSyncScheduler`
+pattern) is the natural next Android-side task, not done here per this
+pass's explicit CRM-only scope.
+
 ## Data mapping
 
 | Android concept | Backend concept |

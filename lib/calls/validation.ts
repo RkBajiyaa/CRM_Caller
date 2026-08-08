@@ -7,6 +7,8 @@ export const startCallSchema = z.object({
   direction: z.enum(CALL_DIRECTIONS),
   agentId: z.string().trim().min(1).optional().nullable(),
   startedAt: z.string().datetime({ offset: true }).optional(),
+  /** Optional -- links this call back to the CallRequest it fulfills, see lib/calls/service.ts. */
+  callRequestId: z.string().trim().min(1).optional().nullable(),
 });
 
 export const updateCallSchema = z.object({
