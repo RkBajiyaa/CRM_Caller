@@ -1545,3 +1545,155 @@ test below) is real, created through the real API, not fabricated.
 - Everything else noted as incomplete in the prior entry (object storage,
   AI provider, GitHub/Vercel deployment, `GET /customers/{badId}`
   200-vs-404) is unchanged.
+
+---
+
+## 2026-08-09 — Remove authentication: straight to the CRM, no login
+
+Explicit instruction: no login/sign-up screen, every page and API route
+open, straight to the CRM. This entry records a full, real removal (files
+deleted, not just disabled) of everything built in the "V1 backend" entry's
+Authentication (Phase 1) section, plus the resulting cleanup across every
+route/page/component that referenced it.
+
+**Also noted, not acted on:** `ConbunCall_V4`'s `data/backend/` package
+(`BackendRepository`, `BackendDtos`, `BackendApiService`) now has real
+`getPendingCallRequests`/`updateCallRequestStatus` methods and DTOs this
+session didn't add -- someone is actively building the Android-side
+call-request polling in parallel, matching exactly what
+`ANDROID_API_INTEGRATION.md`'s "Call request queue" section described as
+the next Android task. Left completely untouched. Its login-related code
+(`BackendRepository.login()`, the Settings "Sign in" button) now calls a
+`404` since this entry deletes that backend endpoint -- flagged clearly in
+`ANDROID_API_INTEGRATION.md`'s new warning banner so whoever is working on
+that side isn't confused by it silently failing; not fixed here, since
+touching `ConbunCall_V4` is outside this pass's explicit CRM-only scope.
+
+### Files deleted
+
+- `proxy.ts` (the page-level auth-redirect middleware, Next.js 16's
+  renamed `middleware.ts`) -- no page protection at all now.
+- `app/login/page.tsx`, `app/login/page.module.css`
+- `app/api/auth/` (entire directory: `login/route.ts`, `logout/route.ts`,
+  `me/route.ts`)
+- `components/crm/LoginForm.tsx`, `LoginForm.module.css`
+- `components/crm/LogoutButton.tsx`, `LogoutButton.module.css`
+- `lib/auth/jwt.ts`, `lib/auth/session.ts`
+- `jose` npm dependency (`npm uninstall jose`) -- it existed solely for
+  JWT signing/verification; confirmed nothing else imported it before
+  removing.
+
+### Files modified
+
+- **Every API route that called `requireAuth()`/`requireRole()`** (15
+  files: `customers`, `customers/[id]`, `customers/lookup`,
+  `customers/[id]/calls`, `customers/[id]/actions`, `calls`, `calls/[id]`,
+  `calls/[id]/recording`, `calls/[id]/transcript`, `calls/[id]/summary`,
+  `actions/[id]`, `agents`, `agents/[id]`, `call-requests`,
+  `call-requests/[id]`) -- the auth-check block and its import removed
+  from each handler. Applied mechanically (a script matched the exact
+  recurring 2-line pattern across all 15 files at once, verified by
+  re-running `npm run lint`/`build` immediately after -- 2 files
+  (`agents/route.ts`, `agents/[id]/route.ts`, which also had
+  `requireRole` immediately after `requireAuth` with no blank line
+  between them) didn't match the script's regex cleanly and were fixed by
+  hand afterward, caught by the resulting build errors, not missed
+  silently).
+- `components/crm/Sidebar.tsx` -- no longer takes `agentName`/`agentRole`
+  props (there's no session to read them from); "Agents" nav item shown
+  unconditionally instead of role-gated; user-row/avatar/logout footer UI
+  removed, back to the static "Conbun Call CRM" footer text.
+- `components/crm/Sidebar.module.css` -- removed the now-unused
+  `.userRow`/`.userAvatar`/`.userText`/`.userName`/`.userRole` rules.
+- `app/(app)/layout.tsx` -- no longer reads the session cookie/verifies a
+  JWT; renders `<Sidebar />` directly.
+- `app/(app)/agents/page.tsx` -- removed the
+  "redirect to `/customers` if not admin" check; renders for anyone.
+  Subtitle text updated (no longer claims agents "sign into the CRM").
+- `lib/agents/service.ts` -- removed `authenticateAgent()` (only caller
+  was the deleted login route); `verifyPassword` import dropped
+  accordingly (still exported from `lib/auth/password.ts`, just unused
+  now).
+- `lib/auth/password.ts` -- kept (still needed: `Agent.passwordHash` is a
+  required, non-null schema column, so `createAgent` still hashes
+  *something* into it), header comment rewritten to explain why a file in
+  `lib/auth/` survives a pass that removed authentication.
+- `lib/auth/validation.ts` -- removed `loginSchema` (only caller was the
+  deleted login route); `createAgentSchema`/`updateAgentSchema` kept
+  (still used by the agents API).
+- `app/api/agents/route.ts` -- doc comments updated ("admin only" →
+  accurate description of what the endpoint actually does now).
+- `app/layout.tsx` -- stale comment about the `/login` page fixed.
+- `.env.example` -- "Auth" section rewritten to say `JWT_SECRET` is no
+  longer read by anything, instead of documenting how to generate one.
+  (The real `.env`'s `JWT_SECRET` value was left alone -- harmless unused
+  local variable, not worth touching a secrets file for a cosmetic
+  cleanup.)
+- `API_DOCUMENTATION.md` -- "Authentication" section rewritten to state
+  plainly that there is none; removed 401/403 from the error-status table;
+  removed "Admin only" labels from the agents endpoints.
+- `ANDROID_API_INTEGRATION.md` -- added a prominent warning banner at the
+  top (see "Also noted" above) and updated the device-test walkthrough to
+  skip the now-broken Sign In step.
+- `CLAUDE.md` -- "Current status" section updated; rule §3.12 rewritten
+  from "every route calls requireAuth()" to "there is no authentication,
+  don't add it back without being asked"; the architecture-summary line
+  claiming "both clients authenticate with tokens" corrected.
+- `CRM_ARCHITECTURE.md` -- added a status note at the top of §8
+  Authentication marking it removed, without rewriting the section itself
+  (kept as the historical design record, same append-don't-rewrite
+  convention this file already follows for corrections).
+
+### Database
+
+**No migration.** `Agent.passwordHash` remains a required schema column
+(making it nullable, or dropping password/email/role entirely, was not
+requested and would be a larger, riskier change than "remove
+enforcement") -- `createAgent` still hashes a password into it, it's just
+never checked against anything on read anymore.
+
+### Testing (all actually run)
+
+- `npm run lint` / `npm run build` -- clean, re-checked at each stage of
+  the removal (immediately after the scripted route edits, again after
+  fixing the two hand-missed files, again after the Sidebar/layout/agents
+  page rewrites, and a final pass at the end). Route list confirmed via
+  the build output: no `/login`, no `/api/auth/*`, no `Proxy (Middleware)`
+  line at all (confirming `proxy.ts`'s removal actually took effect, not
+  just that the file is gone).
+- `npx prisma validate` / `npx prisma migrate status` -- clean (no schema
+  change this pass).
+- **Live verification, real server, zero credentials presented:**
+  - `GET /` → `307` straight to `/customers` (not `/login` -- there is no
+    `/login`).
+  - `GET /customers` with **no cookie, no `Authorization` header at
+    all** → `200`, real seeded test customers and the real customer
+    rendered in the HTML.
+  - `GET /agents` (previously admin-gated) → `200`, agent list rendered,
+    no redirect.
+  - `GET /api/customers` with no auth header → `200` with real data
+    (previously would have been `401`).
+  - `POST /api/call-requests` (the CRM "Call" button's actual request)
+    with no auth header → `201`, `status: "PENDING"` -- confirms the
+    feature built in the previous pass still works end-to-end with no
+    auth in front of it.
+  - `POST /api/customers` (Add New User) with no auth header → `201`.
+  - The ad hoc customer created by the last check above (not marked as
+    test data -- an oversight caught immediately) was deleted right away
+    via `prisma db execute`, along with its associated call request;
+    re-queried `GET /api/customers` afterward and confirmed the count
+    was back to exactly 29 (1 real + 28 clearly-marked test), by name,
+    not just by count.
+- Server stopped after testing (`kill`, confirmed port 3000 free).
+
+### Incomplete / still requiring the next phase
+
+- If authentication is ever wanted back: `CRM_ARCHITECTURE.md` §8 still
+  has the full original design; the deleted files' content is recoverable
+  from git history (this repo's own commits) if reconstructing from
+  scratch isn't preferred.
+- `ConbunCall_V4`'s Settings "Sign in to CRM backend" button now fails
+  (404) -- flagged in `ANDROID_API_INTEGRATION.md`, not fixed (Android
+  changes are out of scope for a CRM-only pass, and someone else appears
+  to be actively working in that codebase right now).
+- Everything else noted as incomplete in the prior entry is unchanged.

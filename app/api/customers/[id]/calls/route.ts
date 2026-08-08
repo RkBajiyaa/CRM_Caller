@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCustomerById } from "@/lib/customers/service";
 import { listCallsForCustomer, getCallStatsForCustomer } from "@/lib/calls/service";
-import { requireAuth } from "@/lib/auth/session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -14,9 +13,6 @@ interface RouteParams {
  * together since the UI always needs both at once.
  */
 export async function GET(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const customer = await getCustomerById(id);
   if (!customer) {

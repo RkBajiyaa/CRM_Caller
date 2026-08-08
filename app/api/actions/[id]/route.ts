@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { updateAction } from "@/lib/actions/service";
 import { updateActionSchema } from "@/lib/actions/validation";
-import { requireAuth } from "@/lib/auth/session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -10,9 +9,6 @@ interface RouteParams {
 
 /** PATCH /api/actions/{id} -- change status ("Completed", "In progress", ...), reassign, edit notes/due date. */
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
 
   let body: unknown;

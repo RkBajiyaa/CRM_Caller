@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getCallById } from "@/lib/calls/service";
 import { getTranscriptByCallId, submitTranscript } from "@/lib/transcripts/service";
-import { requireAuth } from "@/lib/auth/session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -16,9 +15,6 @@ const submitTranscriptSchema = z.object({
 
 /** GET /api/calls/{id}/transcript */
 export async function GET(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const call = await getCallById(id);
   if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });
@@ -34,9 +30,6 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  * replace Conbun Call's transcription system.
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const call = await getCallById(id);
   if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });

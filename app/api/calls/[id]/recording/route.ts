@@ -3,7 +3,6 @@ import { z } from "zod";
 import { getCallById } from "@/lib/calls/service";
 import { getRecordingByCallId, registerRecording } from "@/lib/recordings/service";
 import { getStorageProviderInfo } from "@/lib/storage";
-import { requireAuth } from "@/lib/auth/session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -19,9 +18,6 @@ const registerRecordingSchema = z.object({
 
 /** GET /api/calls/{id}/recording -- metadata only, never audio bytes (lib/storage/index.ts). Returns storage-provider status even if no recording is registered yet. */
 export async function GET(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const call = await getCallById(id);
   if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });
@@ -38,9 +34,6 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  * is recorded as-is for whenever a real provider exists to resolve it.
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const call = await getCallById(id);
   if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });

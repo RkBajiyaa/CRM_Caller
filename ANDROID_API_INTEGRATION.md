@@ -4,6 +4,25 @@ Status as of this writing: **backend-side complete and tested; Android-side
 code added and compiled; no on-device run performed yet.** This document
 records what was actually done, not a plan.
 
+> **⚠️ Backend change since the "Sign in to CRM backend" button below was
+> added: the backend no longer has any authentication.** `POST
+> /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`, the JWT
+> issuing/verification code, and the CRM's own login page were all
+> **deleted** (explicit instruction — see `CHANGELOG.md`). Every endpoint
+> in `API_DOCUMENTATION.md` is now open, no token needed at all.
+>
+> **Practical effect on the Kotlin code described below:** `BackendRepository
+> .login()` / `BackendApiService.login()` now call a URL that returns
+> `404` — that specific method is dead until/unless auth is re-added.
+> Every *other* method (`lookupCustomerByPhone`, `createCustomer`,
+> `startCall`, `finishCall`, `registerRecording`, `submitTranscript`,
+> `submitAiSummary`, and whatever call-request methods exist) still works
+> exactly as documented, just without needing an `authToken` — passing one
+> (or an empty string) is harmless, it's simply not checked anymore. The
+> Settings "Sign in to CRM backend" button will now fail; it can be
+> ignored/left as dead UI, or removed, but this document doesn't do either
+> since that's an Android-side change outside this pass's CRM-only scope.
+
 ## What was inspected in ConbunCall_V4 (read-only)
 
 - `data/crm/` — existing (unwired) client for a *different*, never-built
@@ -93,7 +112,7 @@ pass's explicit CRM-only scope.
 | Android concept | Backend concept |
 |---|---|
 | `AppSettings.apiBaseUrl` | This backend's base URL |
-| `AppSettings.crmAuthToken` | The JWT returned by `POST /api/auth/login`, now fetched via the new Sign In button instead of only manual paste |
+| `AppSettings.crmAuthToken` | No longer meaningful -- the backend has no authentication (see the warning at the top of this document). Can stay blank. |
 | `AppSettings.agentName` (device-local, free text) | An `Agent` row's `name` in the backend — **not yet reconciled**: today's Settings `agentName` is just a display label, while the backend's identity is `email`+`password`→JWT. The Sign In flow above establishes the real identity; `agentName` in Settings could later be derived from the logged-in agent's name instead of typed separately, but that's a UI polish item, not done here. |
 | `CallLogEntry` (from Android's own `CallLog.Calls`) | Maps to a backend `Call` row's `phoneNumber`/`direction`/`startedAt`/`durationSeconds` once a real call site calls `startCall`/`finishCall` |
 | `CallMetadata.transcript` (Whisper output) | `POST /api/calls/{id}/transcript`'s `text` |
@@ -122,16 +141,19 @@ the eventual call-reporting call site ends up.
    this step entirely once the project is pushed and deployed — not done
    yet, see `CHANGELOG.md`.)
 3. **Run the app**, open Settings, set **API Base URL** to that reachable
-   URL, enter the seeded dev admin's email/password (see
-   `prisma/seed.ts` — not repeated here) in the new **Agent email**/
-   **Agent password** fields, tap **Sign in to CRM backend**.
-4. **Confirm** the result text shows "Signed in as Dev Admin (ADMIN)..."
-   and that the CRM Auth Token field above it is now populated.
-5. That completes the login leg of Phase 12's test procedure from a real
-   device. The remaining legs (start call → finish call → recording →
-   transcript → summary) are implemented and backend-verified but need a
-   UI call site wired up before they're reachable the same way — see
-   "What was deliberately NOT done" above for that follow-up task.
+   URL. **Skip the "Sign in to CRM backend" button** — it now calls a
+   deleted endpoint and will fail (see the warning at the top of this
+   document); the CRM Auth Token field can stay blank, nothing checks it
+   anymore.
+4. Exercise any of the still-working `BackendRepository` methods directly
+   (`lookupCustomerByPhone`, `createCustomer`, `startCall`, `finishCall`,
+   `registerRecording`, `submitTranscript`, `submitAiSummary`) — none of
+   them need a real token now, an empty string works.
+5. Start/finish call, recording/transcript/summary submission, and the
+   call-request queue are all implemented and backend-verified but need a
+   real UI call site wired up before they're reachable from the running
+   app the same way login used to be — see "What was deliberately NOT
+   done" above for that follow-up task.
 
 Nothing above is faked or assumed complete — this is the literal, precise
 handoff point.

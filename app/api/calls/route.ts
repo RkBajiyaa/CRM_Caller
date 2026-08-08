@@ -3,7 +3,6 @@ import { z } from "zod";
 import { startCall } from "@/lib/calls/service";
 import { getCustomerById } from "@/lib/customers/service";
 import { startCallSchema } from "@/lib/calls/validation";
-import { requireAuth } from "@/lib/auth/session";
 
 /**
  * POST /api/calls -- "start" a call (step 1 of the two-step lifecycle;
@@ -14,9 +13,6 @@ import { requireAuth } from "@/lib/auth/session";
  * own local mapping) before calling this.
  */
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   let body: unknown;
   try {
     body = await request.json();

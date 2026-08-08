@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/prisma";
-import { hashPassword, verifyPassword } from "@/lib/auth/password";
+import { hashPassword } from "@/lib/auth/password";
 import type { AgentModel } from "@/lib/generated/prisma/models";
 import type { Agent, CreateAgentInput, UpdateAgentInput } from "@/lib/agents/types";
 
@@ -52,19 +52,4 @@ export async function updateAgent(id: string, patch: UpdateAgentInput): Promise<
   } catch {
     return null;
   }
-}
-
-/**
- * Authenticates by email/password. Returns the domain Agent (never the
- * hash) on success, or null on any failure -- wrong email, wrong password,
- * and inactive account are deliberately indistinguishable to the caller
- * (don't leak which one it was; the login route returns one generic error
- * either way).
- */
-export async function authenticateAgent(email: string, password: string): Promise<Agent | null> {
-  const row = await prisma.agent.findUnique({ where: { email } });
-  if (!row || !row.isActive) return null;
-  const valid = await verifyPassword(password, row.passwordHash);
-  if (!valid) return null;
-  return toDomain(row);
 }

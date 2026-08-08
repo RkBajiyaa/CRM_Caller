@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getCallById, updateCall } from "@/lib/calls/service";
 import { updateCallSchema } from "@/lib/calls/validation";
-import { requireAuth } from "@/lib/auth/session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -10,9 +9,6 @@ interface RouteParams {
 
 /** GET /api/calls/{id} */
 export async function GET(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const call = await getCallById(id);
   if (!call) {
@@ -27,9 +23,6 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  * once it knows the outcome of a call it started via POST /api/calls.
  */
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
 
   let body: unknown;

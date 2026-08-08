@@ -245,6 +245,16 @@ Android App                                CRM Web App
 
 ## 8. Authentication
 
+> **Status update (2026-08-09): removed.** Everything below this line was
+> designed and then actually built (JWT via `jose`, bcrypt password
+> hashing, httpOnly cookie + Bearer header, `/api/auth/*` routes, the
+> login page, `proxy.ts` gating every page) -- then removed in full by
+> explicit instruction: no login, every page/route open, straight to the
+> CRM. See `CHANGELOG.md`'s "remove authentication" entry for exactly what
+> was deleted. Left here, unedited, as the historical design record rather
+> than rewritten -- if auth needs to come back, this is the design that
+> was already validated and built once.
+
 Two distinct client types, one issuing authority (this backend):
 
 | Client | Auth flow | Token use |

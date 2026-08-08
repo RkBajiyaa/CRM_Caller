@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { listCustomers, createCustomer, findCustomerByPhoneNumber } from "@/lib/customers/service";
 import { createCustomerSchema } from "@/lib/customers/validation";
-import { requireAuth } from "@/lib/auth/session";
 import { CUSTOMER_STATUSES, type CustomerStatus } from "@/lib/customers/types";
 
 /**
@@ -11,9 +10,6 @@ import { CUSTOMER_STATUSES, type CustomerStatus } from "@/lib/customers/types";
  * real `customers` table on Neon Postgres via lib/customers/service.ts.
  */
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const params = request.nextUrl.searchParams;
   const status = params.get("status");
   const result = await listCustomers({
@@ -32,9 +28,6 @@ export async function GET(request: NextRequest) {
  * here, never accepted from the request body (CLAUDE.md rule #5).
  */
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   let body: unknown;
   try {
     body = await request.json();

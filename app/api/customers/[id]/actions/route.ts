@@ -3,7 +3,6 @@ import { z } from "zod";
 import { getCustomerById } from "@/lib/customers/service";
 import { listActionsForCustomer, createAction } from "@/lib/actions/service";
 import { createActionSchema } from "@/lib/actions/validation";
-import { requireAuth } from "@/lib/auth/session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -11,9 +10,6 @@ interface RouteParams {
 
 /** GET /api/customers/{id}/actions -- follow-ups/actions for one customer. */
 export async function GET(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const customer = await getCustomerById(id);
   if (!customer) return NextResponse.json({ error: "Customer not found." }, { status: 404 });
@@ -24,9 +20,6 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
 /** POST /api/customers/{id}/actions -- create a follow-up/action for this customer. */
 export async function POST(request: NextRequest, { params }: RouteParams) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const { id } = await params;
   const customer = await getCustomerById(id);
   if (!customer) return NextResponse.json({ error: "Customer not found." }, { status: 404 });

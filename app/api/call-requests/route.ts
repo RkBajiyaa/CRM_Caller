@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createCallRequest, listCallRequests } from "@/lib/call-requests/service";
 import { createCallRequestSchema } from "@/lib/call-requests/validation";
-import { requireAuth } from "@/lib/auth/session";
 import { CALL_REQUEST_STATUSES, type CallRequestStatus } from "@/lib/call-requests/types";
 
 /**
@@ -11,9 +10,6 @@ import { CALL_REQUEST_STATUSES, type CallRequestStatus } from "@/lib/call-reques
  * Android flow. `status` optional; omit to list all requests.
  */
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   const statusParam = request.nextUrl.searchParams.get("status");
   const status =
     statusParam && (CALL_REQUEST_STATUSES as string[]).includes(statusParam)
@@ -30,9 +26,6 @@ export async function GET(request: NextRequest) {
  * status PENDING; phoneNumber/customerName are snapshotted server-side.
  */
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (auth instanceof NextResponse) return auth;
-
   let body: unknown;
   try {
     body = await request.json();

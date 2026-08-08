@@ -10,17 +10,24 @@ until the user changes it.
 > `CHANGELOG.md` for the correction record. Everything past this point
 > reflects the corrected architecture.
 
-## Current status (2026-08-08)
+## Current status (2026-08-09)
 
 **V1 backend + CRM UI are implemented and tested against the real Neon
-database** — not a plan. Authentication (JWT, bcrypt), Agents, Customers,
-Calls, Recordings (metadata only), Transcripts, AI summaries (structure
-only, nothing fabricated), and Follow-up Actions all have real tables,
-real API routes, and a real UI. See `API_DOCUMENTATION.md` for the tested
-contract, `CHANGELOG.md` for exactly what was verified and how, and
-`ANDROID_API_INTEGRATION.md` for the Android side. Postgres provider is
-**Neon** (locked, not TBD); ORM is **Prisma**. Not yet pushed to GitHub or
-deployed to Vercel.
+database** — not a plan. Agents, Customers, Calls, Call requests
+(CRM "Call" button → Android pending-request queue), Recordings (metadata
+only), Transcripts, AI summaries (structure only, nothing fabricated), and
+Follow-up Actions all have real tables, real API routes, and a real UI.
+See `API_DOCUMENTATION.md` for the tested contract, `CHANGELOG.md` for
+exactly what was verified and how, and `ANDROID_API_INTEGRATION.md` for
+the Android side. Postgres provider is **Neon** (locked, not TBD); ORM is
+**Prisma**. Not yet pushed to GitHub or deployed to Vercel.
+
+**No authentication.** By explicit instruction, JWT auth, the login page,
+and the page-level auth gate were removed after initially being built —
+every page and API route is open, no sign-in step (see `CHANGELOG.md`'s
+"remove authentication" entry). `Agent` records still exist (still needed
+for `assignedAgentId`/`agentId` references), just no longer as a login
+identity.
 
 ## 0. What this folder is
 
@@ -76,8 +83,9 @@ Android Agent App  --HTTPS API-->  Backend API  <-->  Central Database
   separately-approved integration task).
 - The CRM web frontend never talks to the database directly either — it
   calls this project's own backend/API, same as the Android app would.
-- Both clients authenticate to the backend with tokens; see
-  `CRM_ARCHITECTURE.md` §Authentication.
+- Neither client authenticates to the backend — there is no
+  authentication in this build (§3 rule 12 below; `CRM_ARCHITECTURE.md`
+  §Authentication describes the JWT design that was built, then removed).
 
 ## 3. Non-negotiable rules for this project
 
@@ -115,9 +123,13 @@ Android Agent App  --HTTPS API-->  Backend API  <-->  Central Database
     plain sequential `findUnique` + `create`/`update` instead; see
     `lib/customers/prisma-store.ts`'s comment for the exact pattern. Revisit
     if this environment's networking ever changes, but don't assume it has.
-12. **Every authenticated API route calls `requireAuth()`
-    (`lib/auth/session.ts`) itself** — `proxy.ts` (Next.js 16's renamed
-    `middleware.ts`) only protects pages, not `/api/*`.
+12. **There is no authentication.** `lib/auth/jwt.ts`, `lib/auth/session.ts`,
+    every `/api/auth/*` route, `proxy.ts`, and the login page were all
+    deleted (explicit instruction) — every page and API route is open by
+    design, not by omission. Don't add a `requireAuth()`-style check back
+    into a route "for consistency" without being asked; that's exactly
+    what was removed. `lib/auth/password.ts` (bcrypt hashing) survives
+    only because `Agent.passwordHash` is still a required schema column.
 
 ## 4. Documentation workflow
 

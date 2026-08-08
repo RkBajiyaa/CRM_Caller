@@ -2,22 +2,23 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LogoutButton } from "@/components/crm/LogoutButton";
-import { initials } from "@/lib/format";
 import styles from "./Sidebar.module.css";
 
-interface SidebarProps {
-  agentName: string | null;
-  agentRole: "ADMIN" | "AGENT" | null;
-}
+const NAV_ITEMS = [
+  { label: "Customers", href: "/customers" as const },
+  { label: "Agents", href: "/agents" as const },
+];
 
-/** Primary navigation. "Agents" only shows for admins (role-gated both here and, authoritatively, at the API level -- lib/auth/session.ts's requireRole). "Calls"/"Reports" remain disabled placeholders -- no standalone pages for those yet, call data lives inside the customer detail page. Client Component (not the parent Server Component layout) specifically so `usePathname()` can highlight the current section correctly now that there's more than one real link. */
-export function Sidebar({ agentName, agentRole }: SidebarProps) {
+/**
+ * Primary navigation. No authentication in this build (see CHANGELOG.md)
+ * -- both real sections are always shown, there's no login/role to gate
+ * them on. "Calls"/"Reports" remain disabled placeholders -- no
+ * standalone pages for those yet, call data lives inside the customer
+ * detail page. Client Component so `usePathname()` can highlight the
+ * current section.
+ */
+export function Sidebar() {
   const pathname = usePathname();
-  const navItems = [
-    { label: "Customers", href: "/customers" as const },
-    ...(agentRole === "ADMIN" ? [{ label: "Agents", href: "/agents" as const }] : []),
-  ];
 
   return (
     <aside className={styles.sidebar}>
@@ -26,7 +27,7 @@ export function Sidebar({ agentName, agentRole }: SidebarProps) {
         <span className={styles.brandName}>Conbun CRM</span>
       </div>
       <nav className={styles.nav}>
-        {navItems.map((item) => {
+        {NAV_ITEMS.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link
@@ -48,18 +49,7 @@ export function Sidebar({ agentName, agentRole }: SidebarProps) {
         </span>
       </nav>
       <div className={styles.footer}>
-        {agentName ? (
-          <div className={styles.userRow}>
-            <span className={styles.userAvatar}>{initials(agentName)}</span>
-            <div className={styles.userText}>
-              <span className={styles.userName}>{agentName}</span>
-              <span className={styles.userRole}>{agentRole === "ADMIN" ? "Admin" : "Agent"}</span>
-            </div>
-            <LogoutButton />
-          </div>
-        ) : (
-          <p className={styles.footerText}>Conbun Call CRM</p>
-        )}
+        <p className={styles.footerText}>Conbun Call CRM</p>
       </div>
     </aside>
   );

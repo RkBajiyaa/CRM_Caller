@@ -17,48 +17,23 @@ All endpoints are under `/api/...`. All request/response bodies are JSON.
 
 ## Authentication
 
-Backend-issued JWT (HS256, 7-day expiry, stateless — no server-side
-revocation list in V1). One issuing endpoint serves both client types:
+**There is none.** By explicit instruction, JWT auth, the login page, and
+the page-level auth gate were all removed (see `CHANGELOG.md`). Every
+endpoint below is open — no cookie, no `Authorization` header, no
+`POST /api/auth/login` (that endpoint no longer exists). Visiting the CRM
+goes straight to `/customers`, no sign-in step.
 
-| Client | How the token is sent |
-|---|---|
-| CRM web | httpOnly cookie (`crm_session`), set automatically by `/api/auth/login`, sent automatically by the browser on every request. |
-| Android / any non-browser client | `Authorization: Bearer <token>` header, read from the login response body and stored client-side. |
+This is a deliberate product decision for the current phase, not an
+oversight — flagged here so it isn't mistaken for a bug, and so it's easy
+to find if/when auth needs to come back (`lib/auth/password.ts` still
+exists and still hashes `Agent.passwordHash` on creation; `lib/auth/jwt.ts`,
+`session.ts`, and every `/api/auth/*` route were deleted outright, not
+just disabled, and would need to be re-added).
 
-Every endpoint below except `POST /api/auth/login` requires one of the two.
-Missing/invalid/expired credentials → `401 { "error": "Authentication required." }`.
-Endpoints marked **Admin only** additionally require `role: "ADMIN"` →
-otherwise `403 { "error": "You do not have permission to perform this action." }`.
-
-### `POST /api/auth/login`
-
-```json
-// Request
-{ "email": "agent@example.com", "password": "..." }
-
-// 200 response
-{
-  "data": {
-    "token": "<jwt>",
-    "agent": { "id": "...", "name": "...", "email": "...", "role": "ADMIN", "isActive": true, "createdAt": "...", "updatedAt": "..." }
-  }
-}
-
-// 401 (wrong email, wrong password, or inactive account -- indistinguishable on purpose)
-{ "error": "Invalid email or password." }
-```
-
-### `POST /api/auth/logout`
-
-No body. Clears the CRM web session cookie. Returns `{ "data": { "loggedOut": true } }`.
-Does **not** invalidate a bearer token already issued to another client —
-documented V1 limitation, see `lib/auth/jwt.ts`.
-
-### `GET /api/auth/me`
-
-Returns the currently authenticated agent (same shape as `login`'s `agent`
-field). Used by both the CRM shell and clients confirming a token is still
-valid.
+`Agent` records (name/email/role/active-state) still exist and are still
+manageable via `/agents` and `POST`/`PATCH /api/agents*` below — they're
+just no longer a login identity, only a thing `Customer.assignedAgentId`/
+`Call.agentId` can reference.
 
 ## Error format
 
@@ -71,10 +46,10 @@ generic `500` from Next.js's own error handling.
 | Status | Meaning |
 |---|---|
 | 400 | Validation failed (see `details`) or malformed JSON body |
-| 401 | Not authenticated |
-| 403 | Authenticated, but wrong role for this action |
 | 404 | Resource (customer/call/agent/action) not found |
 | 409 | Conflict — e.g. phone number or agent email already in use |
+
+(401/403 are not used anywhere in this build — there's no authentication or role check to fail. See "Authentication" above.)
 
 ## Customers
 
@@ -329,18 +304,21 @@ Android's own `OpenAiSummaryProvider`), not this backend.
 
 ### `GET /api/agents`
 
-Any authenticated agent — used for the "Assigned agent" picker.
+Used for the "Assigned agent" picker.
 
-### `POST /api/agents` — **Admin only**
+### `POST /api/agents`
 
 ```json
 { "name": "...", "email": "...", "password": "...", "role": "AGENT" }
 ```
 
 `password` min 8 characters, hashed with bcrypt before storage — never
-stored or returned in plaintext. `409` if the email is already in use.
+stored or returned in plaintext, but also no longer checked against
+anything (no login exists to use it). `409` if the email is already in
+use. `role` is still stored (`ADMIN`/`AGENT`) but doesn't currently gate
+anything.
 
-### `PATCH /api/agents/{id}` — **Admin only**
+### `PATCH /api/agents/{id}`
 
 ```json
 { "name": "...", "role": "ADMIN", "isActive": false }
