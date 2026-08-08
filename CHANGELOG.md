@@ -366,3 +366,90 @@ tables, no CRM UI, no auth, no Android changes.**
 - Node engine mismatch warning (`@prisma/streams-local` wants Node ≥22,
   this environment has 20.20.2) noted above — not blocking, not yet
   resolved either way.
+
+---
+
+## 2026-08-08 — Phase 1 clean final verification (no code changes needed)
+
+Requested re-verification of everything from the Phase 1 scaffold pass,
+from a fully clean state rather than trusting prior in-memory results.
+**Result: everything already passed cleanly; no fixes were required.**
+
+**Files created:**
+- None.
+
+**Files modified:**
+- None. No issues were found that required a change.
+
+**Files deleted:**
+- None (temporary local build artifacts regenerated during verification —
+  `node_modules/`, `.next/`, `lib/generated/` — were already gitignored and
+  not part of the commit either before or after).
+
+**Verification performed (each item below actually run, not reviewed by
+eye):**
+
+1. **`package.json` duplicate/conflicting entries** — parsed with `python3
+   json.loads`; confirmed a single occurrence of each top-level key, zero
+   overlap between `dependencies` and `devDependencies`. `npm ci` (strict
+   lockfile-vs-manifest install, fails on mismatch) succeeded, which is a
+   stronger check than `npm install` alone. **Clean.**
+2. **`app/layout.tsx` valid, no duplicate JSX** — read in full: single
+   `<html>`/`<body>`, no duplication. Compiles clean under `next build`'s
+   TypeScript pass. **Clean.**
+3. **`app/page.tsx` valid** — read in full: single `<main>`, no
+   duplication, compiles clean. **Clean.**
+4. **`GET /api/health`** — verified live twice: once against `next start`
+   (the actual production server build, not just `next dev`) after a fully
+   clean `rm -rf node_modules .next lib/generated && npm ci` — returned
+   `{"status":"ok","service":"conbun-crm-backend","timestamp":"..."}` via
+   real `curl` against `localhost:3000`. **Clean.**
+5. **Prisma configuration valid** — `npx prisma validate` →
+   `The schema at prisma/schema.prisma is valid`. **Clean.**
+6. **Prisma client generation succeeds** — `npm run db:generate` →
+   `Generated Prisma Client (7.9.1) to ./lib/generated/prisma`, from a
+   clean state (directory deleted first). **Clean.**
+7. **Environment files correctly configured** — `.env` (gitignored,
+   placeholder `DATABASE_URL`) and `.env.example` (committed, same
+   placeholder shape, documented) both read back and confirmed consistent;
+   `.gitignore` confirmed to exclude `.env*` while explicitly re-including
+   `.env.example`. **Clean.**
+8. **No real secrets committed** — `git ls-files` confirmed `.env` is not
+   tracked (only `.env.example` is); `git grep` across all tracked files
+   for `DATABASE_URL=` found no occurrence outside the documented
+   placeholder files. **Clean.**
+9. **`npm run lint`** — clean, zero errors/warnings, run fresh after a
+   clean reinstall. **Clean.**
+10. **`npm run build`** — clean production build from a fully clean
+    `node_modules`/`.next`, compiled + type-checked with no errors, both
+    routes built (`/` static, `/api/health` dynamic). **Clean.**
+
+**Incidental finding, not a bug:** grepping `CLAUDE.md` for the Next.js
+agent-rules marker initially returned 2 matches; inspected and confirmed
+one is the literal marker text quoted inside this project's own §7
+explanation of the block, and the other is the single real managed block
+at the end of the file — **not a duplicate block.** No action needed.
+
+**Tests/builds performed:**
+- `rm -rf node_modules .next lib/generated`
+- `npm ci` — clean install from lockfile, succeeded
+- `npx prisma validate` — passed
+- `npm run db:generate` — passed
+- `npm run lint` — passed, clean
+- `npm run build` — passed, clean
+- `npm run start` (production server, not dev) — started; `GET /` → HTTP
+  200; `GET /api/health` → valid JSON; server stopped afterward and port
+  3000 confirmed free (had to `kill` the `next-server` PID directly the
+  first time, since `pkill -f "next start"` doesn't match the actual
+  `next-server (v16.3.0)` process name — noted for future sessions stopping
+  a `next start` server in this repo).
+
+**Actual results:**
+- All 10 requested verification items pass with zero issues found. No code
+  changes were made this pass because none were needed.
+
+**Incomplete / still requiring verification:**
+- Unchanged from the prior entry: no Neon database provisioned, no GitHub
+  remote, no Vercel project, no models/tables, no auth, no CRM UI. All
+  correctly out of scope for Phase 1.
+- Phase 1 is now verification-complete. Awaiting approval before Phase 2.
