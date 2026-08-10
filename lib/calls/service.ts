@@ -1,7 +1,14 @@
 import { Prisma } from "@/lib/generated/prisma/client";
 import type { CallDefaultArgs, CallGetPayload } from "@/lib/generated/prisma/models";
 import { prisma } from "@/lib/db/prisma";
-import type { Call, StartCallInput, UpdateCallInput, CustomerCallStats } from "@/lib/calls/types";
+import type {
+  Call,
+  CallStatus,
+  StartCallInput,
+  UpdateCallInput,
+  CustomerCallStats,
+  CustomerCallSummary,
+} from "@/lib/calls/types";
 
 // `Prisma.validator` doesn't exist in Prisma 7's generated client -- `satisfies`
 // against the model's own *DefaultArgs type is the current equivalent way to
@@ -9,9 +16,16 @@ import type { Call, StartCallInput, UpdateCallInput, CustomerCallStats } from "@
 const callWithRelations = {
   include: {
     agent: { select: { name: true } },
-    recording: { select: { id: true } },
-    transcript: { select: { processingStatus: true } },
+    // Recording duration/status come along with the existence check -- same
+    // row, same join, no extra round trip, and it lets the Customer Detail
+    // page show what Android actually reported instead of just "yes/no".
+    recording: { select: { id: true, durationSeconds: true, processingStatus: true } },
+    // `text` too: the transcript is the point of the whole pipeline, and
+    // fetching it here is what lets Call History display it inline rather
+    // than only badge whether it exists (CRM_ARCHITECTURE.md Phase 6).
+    transcript: { select: { processingStatus: true, text: true, language: true } },
     aiSummary: { select: { processingStatus: true } },
+    callRequest: { select: { id: true, status: true } },
   },
 } satisfies CallDefaultArgs;
 type CallWithRelations = CallGetPayload<typeof callWithRelations>;
@@ -31,8 +45,14 @@ function toDomain(row: CallWithRelations): Call {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     hasRecording: row.recording !== null,
+    recordingDurationSeconds: row.recording?.durationSeconds ?? null,
+    recordingStatus: row.recording?.processingStatus ?? null,
     transcriptStatus: row.transcript?.processingStatus ?? null,
+    transcriptText: row.transcript?.text ?? null,
+    transcriptLanguage: row.transcript?.language ?? null,
     aiSummaryStatus: row.aiSummary?.processingStatus ?? null,
+    callRequestId: row.callRequest?.id ?? null,
+    callRequestStatus: row.callRequest?.status ?? null,
   };
 }
 
@@ -120,9 +140,77 @@ export async function updateCall(id: string, patch: UpdateCallInput): Promise<Ca
   }
 }
 
-/** Aggregate call-activity stats for the Customer Detail page's "Call activity" cards. Computed in application code from the same rows listCallsForCustomer would return -- call volume per customer is small enough that this doesn't need a separate aggregate query. */
-export async function getCallStatsForCustomer(customerId: string): Promise<CustomerCallStats> {
-  const calls = await listCallsForCustomer(customerId);
+/**
+ * Per-customer call summary for a *page* of customers, in one round trip.
+ *
+ * Replaces what the customers list used to do: call `getCallStatsForCustomer`
+ * once per row, i.e. 25 separate full call-history queries (each with four
+ * joins) to render 25 numbers. Measured against the real Neon database that
+ * cost ~6.1s of the ~11s page load -- and `Promise.all` did not help, because
+ * this project's Neon adapter effectively serializes concurrent queries
+ * (measured: 4 trivial queries take ~1.0s sequentially and ~2.6s in
+ * parallel). Fewer queries is the only lever that works here, so this is one.
+ *
+ * Raw SQL rather than `groupBy`: `DISTINCT ON` + a partition COUNT gets the
+ * per-customer total *and* the most recent call's outcome together, which
+ * `groupBy` cannot express -- it would take two queries and still not return
+ * the last call's status. Uses the `calls(customer_id, started_at)` index.
+ * Every column is cast to a plain scalar type because this project's Neon
+ * adapter can't deserialize Postgres enum/`name` columns through `$queryRaw`.
+ */
+export async function getCallSummariesForCustomers(
+  customerIds: string[]
+): Promise<Map<string, CustomerCallSummary>> {
+  const summaries = new Map<string, CustomerCallSummary>();
+  if (customerIds.length === 0) return summaries;
+
+  const rows = await prisma.$queryRaw<
+    {
+      customer_id: string;
+      total_calls: bigint;
+      started_at: Date;
+      status: string | null;
+      duration_seconds: number;
+    }[]
+  >`
+    SELECT DISTINCT ON ("customer_id")
+      "customer_id",
+      COUNT(*) OVER (PARTITION BY "customer_id") AS total_calls,
+      "started_at",
+      "status"::text AS status,
+      "duration_seconds"
+    FROM "calls"
+    WHERE "customer_id" IN (${Prisma.join(customerIds)})
+    ORDER BY "customer_id", "started_at" DESC
+  `;
+
+  for (const row of rows) {
+    summaries.set(row.customer_id, {
+      customerId: row.customer_id,
+      totalCalls: Number(row.total_calls),
+      lastCallAt: row.started_at.toISOString(),
+      lastCallStatus: (row.status as CallStatus | null) ?? null,
+      lastCallDurationSeconds: row.duration_seconds,
+    });
+  }
+  return summaries;
+}
+
+/**
+ * Aggregate call-activity stats for the Customer Detail page's "Call
+ * activity" cards.
+ *
+ * Pass the calls you already have (the detail page renders the same list
+ * right below these cards) to compute them without a second identical query
+ * -- that duplicate round trip was pure waste on every detail-page load.
+ * Omitting the argument keeps the original self-fetching behaviour for any
+ * caller that only wants the numbers.
+ */
+export async function getCallStatsForCustomer(
+  customerId: string,
+  knownCalls?: Call[]
+): Promise<CustomerCallStats> {
+  const calls = knownCalls ?? (await listCallsForCustomer(customerId));
   const answered = calls.filter((c) => c.status === "ANSWERED");
   const missed = calls.filter((c) => c.status === "MISSED" || c.status === "REJECTED" || c.status === "FAILED");
   const incoming = calls.filter((c) => c.direction === "INCOMING");

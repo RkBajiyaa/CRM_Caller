@@ -134,6 +134,22 @@ model Customer {
   /// removed or repurposed.
   phoneNumber String @unique @map("phone_number")
 
+  /// Normalized lookup key: the last 10 digits of `phoneNumber` with every
+  /// non-digit stripped ("+91 93352 74362" -> "9335274362"). Derived, never
+  /// authored -- lib/customers/prisma-store.ts recomputes it on every write
+  /// from `phoneNumber`, which stays the single source of truth and the
+  /// value every client sees. Exists because Android normalizes numbers its
+  /// own way before calling GET /api/customers/lookup (see
+  /// ConbunCall_V4's PhoneNumberUtils.normalize/looseMatch), so an exact
+  /// string match on `phoneNumber` misses customers stored with spaces or a
+  /// different country-code prefix -- which is exactly why several
+  /// CRM-created call requests were left stranded at ACCEPTED with no Call
+  /// row (see CHANGELOG.md 2026-08-10). Deliberately NOT unique: real data
+  /// can already contain two rows that collide on the last 10 digits, and a
+  /// failed migration would be worse than an ambiguous lookup (which
+  /// resolves to the oldest CRM entry, deterministically).
+  phoneKey String? @map("phone_key")
+
   location String?
 
   /// Denormalized display name, kept for backward compatibility with the
@@ -173,6 +189,12 @@ model Customer {
 
   @@index([assignedAgentId])
   @@index([status])
+  /// Serves GET /api/customers/lookup's normalized fallback -- see phoneKey.
+  @@index([phoneKey])
+  /// The customers list is always `ORDER BY crm_entry_created_at DESC` with
+  /// LIMIT/OFFSET (lib/customers/prisma-store.ts). Without this, every page
+  /// load sorts the whole table; fine at 30 rows, not at 30k.
+  @@index([crmEntryCreatedAt])
   @@map("customers")
 }
 
@@ -221,7 +243,12 @@ model Call {
   /// still be reported without ever having gone through a CallRequest).
   callRequest CallRequest?
 
-  @@index([customerId])
+  /// Composite, not a bare `customerId`: every call query in the app is
+  /// "this customer's calls, newest first" (lib/calls/service.ts) or the
+  /// per-page aggregate behind the customers list. `customerId` alone is a
+  /// prefix of this, so this index also serves everything the old
+  /// single-column one did -- it replaces it rather than adding to it.
+  @@index([customerId, startedAt])
   @@index([agentId])
   @@index([startedAt])
   @@map("calls")
@@ -261,7 +288,11 @@ model CallRequest {
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   @@index([customerId])
-  @@index([status])
+  /// Android polls `GET /api/call-requests?status=PENDING` every 4 seconds
+  /// (ConbunCall_V4's CallRequestPoller), which is exactly
+  /// `WHERE status = 'PENDING' ORDER BY requested_at ASC`. `status` alone is
+  /// a prefix of this, so this replaces the old single-column index.
+  @@index([status, requestedAt])
   @@map("call_requests")
 }
 

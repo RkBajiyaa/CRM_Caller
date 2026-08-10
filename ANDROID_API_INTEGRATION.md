@@ -1,5 +1,105 @@
 # Android Integration — Conbun Call ↔ Conbun CRM Backend
 
+> **⚠️ Correction (2026-08-10).** Everything below the "What was inspected"
+> heading describes the state on 2026-08-08 and is **out of date in two
+> important ways**. It is left in place as the historical record (this
+> project appends corrections rather than rewriting history — `CLAUDE.md`
+> §4); read the new **"Current contract (verified 2026-08-10)"** section
+> immediately below first, which was written by reading the actual Kotlin
+> source in `ConbunCall_V4`, not this document.
+>
+> The two stale claims: (1) "no on-device run performed yet" — the CRM →
+> Android call flow has since been exercised on a real device, and the
+> database still holds the rows it produced; (2) "`BackendRepository`/
+> `BackendApiService` don't have call-request methods yet" — they do, and
+> `CallRequestPoller` drives them.
+
+## Current contract (verified 2026-08-10)
+
+Verified by reading `ConbunCall_V4`'s source (read-only — no Android file
+was modified) and by exercising every endpoint against the live Neon
+database from the CRM side. Nothing in this section is assumed.
+
+### What Android actually implements today
+
+| Android file | What it does |
+|---|---|
+| `data/backend/BackendApiService.kt` | Retrofit contract: customer lookup/create, call requests (list + PATCH), call start/finish, recording metadata, transcript, AI summary. No `login()` — the backend has no auth. |
+| `data/repository/CallRequestPoller.kt` | Polls `GET /api/call-requests?status=PENDING` **every 4 seconds** while the app is foregrounded, accepts one at a time, dials via `CallManager`. |
+| `data/repository/CallSessionTracker.kt` | On every call placed: normalizes the number, `GET /api/customers/lookup`, and if it matches, `POST /api/calls`. On call end: `PATCH /api/calls/{id}` with the CallLog-derived outcome + duration, then registers recording metadata and schedules transcription. |
+| `work/TranscriptionWorker.kt` | Uploads the finished Whisper transcript via `POST /api/calls/{id}/transcript`. |
+
+### Contract mismatch found — and how it was resolved
+
+**Phone-number matching. This was a live defect, not a theoretical one.**
+
+Android normalizes a number (`PhoneNumberUtils.normalize`: keep digits and a
+leading `+`) *before* calling `GET /api/customers/lookup`. The CRM matched
+that string **exactly** against the stored `phoneNumber`. So a customer the
+CRM stored as `"+91 90000 00001"` was never found when Android asked for
+`"+919000000001"` — the lookup 404'd, `CallSessionTracker` logged "not a
+known CRM customer", and no `Call` row was ever created.
+
+The evidence was sitting in the production database: of all the CRM call
+requests, only the ones for the single customer whose number was stored
+already-normalized (`+919335274362`) had a linked `callId`. Every request for
+a `"+91 90000 000XX"` customer was stranded at `ACCEPTED` with `callId:
+null` — dialed, but invisible to the CRM afterwards.
+
+**Fixed on the CRM side only** (no Android change): the backend now matches
+exactly first, then falls back to comparing the **last 10 digits** with
+non-digits stripped — the same rule Android's own `looseMatch` already uses.
+See `API_DOCUMENTATION.md` § `GET /api/customers/lookup`. Android needs no
+change and gets no new field; it keeps sending exactly what it always sent.
+
+### `CallRequest.status` = `COMPLETED` means "dialed", not "call finished"
+
+`CallSessionTracker.onCallInitiated` PATCHes the request to `COMPLETED` the
+moment `POST /api/calls` returns — at the *start* of the call. The call's
+real outcome arrives later on `PATCH /api/calls/{id}`.
+
+Neither side was changed for this. The CRM instead derives what it displays
+by combining the two records (`lib/call-requests/lifecycle.ts`), so it can
+distinguish Queued / Dialing / In progress / Connected / Not answered /
+Failed / Cancelled without a second status column and without asking Android
+to report anything new. Full table in `API_DOCUMENTATION.md` § "What
+`COMPLETED` actually means here".
+
+### Android → CRM direction (a normal call, not a CRM-initiated one)
+
+Already implemented on the Android side and now working on the CRM side:
+
+```
+Android places any call -> CallSessionTracker.onCallInitiated
+  -> GET /api/customers/lookup?phoneNumber=<normalized>
+       match    -> POST /api/calls (customerId), and the whole
+                   finish/recording/transcript pipeline follows
+       no match -> nothing happens. No customer is created, nothing is
+                   imported, and nothing on the phone is touched.
+```
+
+The backend does the number matching precisely so the phone never needs a
+copy of the customer list. `POST /api/customers` exists but **no Android call
+site calls it** (verified by grep) — an unknown number stays unknown.
+
+The "CRM Connectivity ON/OFF" switch is an Android-side setting and is not
+represented in this API; today the equivalent is a blank
+`AppSettings.apiBaseUrl`, which makes `CallSessionTracker` skip CRM
+registration entirely. Nothing on the CRM side needs to change when that
+switch is added.
+
+### Two smaller CRM-side changes worth knowing about
+
+- `POST /api/call-requests` is now idempotent while a request is `PENDING`
+  (returns the existing one with `200`). Android never POSTs here, so it is
+  unaffected — this stops the CRM from queueing duplicate dials.
+- `GET /api/call-requests` is now bounded (`limit`, default 200, oldest
+  first). Android's `status=PENDING` poll is unaffected in practice.
+
+---
+
+_Everything below is the 2026-08-08 record, preserved as written._
+
 Status as of this writing: **backend-side complete and tested; Android-side
 code added and compiled; no on-device run performed yet.** This document
 records what was actually done, not a plan.

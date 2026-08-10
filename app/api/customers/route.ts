@@ -43,10 +43,22 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Now catches same-number-different-formatting too (e.g. adding
+  // "+91 93352 74362" when "9335274362" already exists), because
+  // findCustomerByPhoneNumber falls back to the normalized key. That matters
+  // beyond tidiness: two rows agreeing on the last 10 digits make
+  // GET /api/customers/lookup ambiguous, so the call Android reports could
+  // land on the wrong customer. Response shape is unchanged.
   const existing = await findCustomerByPhoneNumber(parsed.data.phoneNumber);
   if (existing) {
+    const sameText = existing.phoneNumber === parsed.data.phoneNumber;
     return NextResponse.json(
-      { error: "A customer with this phone number already exists.", customerId: existing.id },
+      {
+        error: sameText
+          ? "A customer with this phone number already exists."
+          : `This is the same number as an existing customer (${existing.name}, ${existing.phoneNumber}).`,
+        customerId: existing.id,
+      },
       { status: 409 }
     );
   }

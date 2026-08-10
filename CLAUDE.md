@@ -20,7 +20,23 @@ Follow-up Actions all have real tables, real API routes, and a real UI.
 See `API_DOCUMENTATION.md` for the tested contract, `CHANGELOG.md` for
 exactly what was verified and how, and `ANDROID_API_INTEGRATION.md` for
 the Android side. Postgres provider is **Neon** (locked, not TBD); ORM is
-**Prisma**. Not yet pushed to GitHub or deployed to Vercel.
+**Prisma**. ~~Not yet pushed to GitHub or deployed to Vercel.~~
+
+> **Status correction (2026-08-10):** the CRM **is** deployed to Vercel now,
+> and the CRM → Android call flow has been exercised on a real device. Two
+> things a future session should know before touching performance or phone
+> handling — both recorded in full in `CHANGELOG.md`'s 2026-08-10 entry:
+> (1) **`Promise.all` makes things slower here.** This environment's Neon
+> adapter effectively serializes concurrent queries and pays connection setup
+> per one (measured: four trivial queries ~1.0s sequential vs ~2.6s wrapped
+> in `Promise.all`). The lever for page latency is *fewer* queries, never
+> parallel ones — don't "optimize" the sequential `await`s in the service
+> layer into `Promise.all`.
+> (2) **Phone lookup is normalized on the backend.** `Customer.phoneKey`
+> (last 10 digits, non-digits stripped) exists because Android normalizes
+> numbers its own way before calling `GET /api/customers/lookup`.
+> `phoneNumber` remains the source of truth; `phoneKey` is derived from it on
+> every write and never authored or accepted from a client.
 
 **No authentication.** By explicit instruction, JWT auth, the login page,
 and the page-level auth gate were removed after initially being built —

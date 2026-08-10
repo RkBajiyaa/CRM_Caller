@@ -1,13 +1,17 @@
+import { cache } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getCustomerById } from "@/lib/customers/service";
 import { listCallsForCustomer, getCallStatsForCustomer } from "@/lib/calls/service";
+import { listCallRequestsForCustomer } from "@/lib/call-requests/service";
 import { listActionsForCustomer } from "@/lib/actions/service";
+import { callLifecycleState, CALL_LIFECYCLE_LABELS, isCallLifecycleActive } from "@/lib/call-requests/lifecycle";
 import { PageHeader } from "@/components/crm/PageHeader";
 import { Avatar } from "@/components/crm/Avatar";
 import { StatusBadge } from "@/components/crm/StatusBadge";
 import { StatCard } from "@/components/crm/StatCard";
 import { CallHistoryTable } from "@/components/crm/CallHistoryTable";
+import { CallRequestButton } from "@/components/crm/CallRequestButton";
 import { FollowUpList } from "@/components/crm/FollowUpList";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { formatDate, formatDateTime, formatDuration } from "@/lib/format";
@@ -21,32 +25,56 @@ interface PageProps {
 // be statically cached across requests.
 export const dynamic = "force-dynamic";
 
+// generateMetadata and the page component both need the customer, and Next.js
+// runs them as two separate calls -- without this they were two identical
+// database round trips for one page view. React's `cache` memoizes per
+// request, so the second call is free; it does not cache across requests, so
+// nothing goes stale.
+const getCustomer = cache(getCustomerById);
+
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { id } = await params;
-  const customer = await getCustomerById(id);
+  const customer = await getCustomer(id);
   return { title: customer ? `${customer.name} -- Conbun CRM` : "Customer not found -- Conbun CRM" };
 }
 
 export default async function CustomerDetailPage({ params }: PageProps) {
   const { id } = await params;
-  const customer = await getCustomerById(id);
+  const customer = await getCustomer(id);
   if (!customer) notFound();
 
-  // All real data now -- calls/recordings/transcripts/AI-summary status
-  // come from the actual `calls`/`recordings`/`transcripts`/`ai_summaries`
-  // tables (lib/calls/service.ts), not the earlier mock module. A brand
-  // new customer legitimately has zero calls; the empty state below
-  // reflects that honestly instead of showing sample data.
-  const [calls, stats, actions] = [
-    await listCallsForCustomer(id),
-    await getCallStatsForCustomer(id),
-    await listActionsForCustomer(id),
-  ];
+  // All real data -- calls/recordings/transcripts/AI-summary status come from
+  // the actual `calls`/`recordings`/`transcripts`/`ai_summaries` tables
+  // (lib/calls/service.ts). A brand new customer legitimately has zero calls;
+  // the empty state below reflects that honestly instead of showing sample
+  // data. Stats are computed from the `calls` already fetched rather than by
+  // re-running the same query a second time.
+  const calls = await listCallsForCustomer(id);
+  const stats = await getCallStatsForCustomer(id, calls);
+  const callRequests = await listCallRequestsForCustomer(id);
+  const actions = await listActionsForCustomer(id);
   const actionsByCallId = new Map(actions.filter((a) => a.callId).map((a) => [a.callId as string, a]));
+
+  // What this customer's calling is doing right now, from the two records
+  // that already describe it (see lib/call-requests/lifecycle.ts) -- no new
+  // status is stored anywhere.
+  const latestRequest = callRequests[0] ?? null;
+  const latestCall = calls[0] ?? null;
+  // The call this request actually produced -- not merely the customer's most
+  // recent call, which can be a different, unrelated one.
+  const requestCall = latestRequest?.callId ? calls.find((call) => call.id === latestRequest.callId) : undefined;
+  const lifecycle = latestRequest
+    ? callLifecycleState(latestRequest.status, requestCall?.status ?? null, Boolean(latestRequest.callId))
+    : callLifecycleState(null, latestCall?.status ?? null, Boolean(latestCall));
 
   return (
     <div>
-      <PageHeader title={customer.name} backHref="/customers" backLabel="Customers" />
+      <PageHeader
+        title={customer.name}
+        backHref="/customers"
+        backLabel="Customers"
+        actions={<CallRequestButton customerId={customer.id} lifecycle={lifecycle} size="md" />}
+      />
 
       <div className={styles.layout}>
         <Card className={styles.profileCard}>
@@ -80,6 +108,28 @@ export default async function CustomerDetailPage({ params }: PageProps) {
         </Card>
 
         <div className={styles.mainColumn}>
+          {latestRequest && (
+            <Card>
+              <CardHeader
+                title="Call request"
+                subtitle="The CRM's most recent Call button press and what Android has done with it"
+              />
+              <div className={styles.requestRow}>
+                <span
+                  className={[styles.requestState, isCallLifecycleActive(lifecycle) && styles.requestStateLive]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {CALL_LIFECYCLE_LABELS[lifecycle]}
+                </span>
+                <span className={styles.requestMeta}>
+                  Requested {formatDateTime(latestRequest.requestedAt)} &middot; queue status {latestRequest.status}
+                  {latestRequest.callId ? " · linked to a call" : ""}
+                </span>
+              </div>
+            </Card>
+          )}
+
           <Card>
             <CardHeader title="Call activity" subtitle="Summary across all recorded calls" />
             <div className={styles.statsGrid}>
@@ -105,7 +155,7 @@ export default async function CustomerDetailPage({ params }: PageProps) {
             <div className={styles.historyHeader}>
               <CardHeader
                 title="Call history"
-                subtitle="Recording, transcript, and AI summary availability per call"
+                subtitle="Outcome, duration, recording and transcript per call -- open a row to read the transcript"
               />
             </div>
             <CallHistoryTable calls={calls} actionsByCallId={actionsByCallId} />

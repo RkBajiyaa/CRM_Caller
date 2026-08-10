@@ -1,5 +1,7 @@
 /** Shared Call types. Mirrors prisma/schema.prisma's Call model field-for-field. */
 
+import type { CallRequestStatus } from "@/lib/call-requests/types";
+
 export type CallDirection = "INCOMING" | "OUTGOING";
 export type CallStatus = "ANSWERED" | "MISSED" | "REJECTED" | "FAILED";
 
@@ -21,8 +23,35 @@ export interface Call {
   createdAt: string;
   updatedAt: string;
   hasRecording: boolean;
+  /** What Android reported for the recording it matched, when it reported one. Null = no recording registered, or registered without a duration. */
+  recordingDurationSeconds: number | null;
+  recordingStatus: string | null;
   transcriptStatus: string | null;
+  /** The transcript Android's Whisper pipeline uploaded. Null until it arrives -- never a placeholder. */
+  transcriptText: string | null;
+  transcriptLanguage: string | null;
   aiSummaryStatus: string | null;
+  /**
+   * The CRM call request this call fulfilled, if it came from the CRM's
+   * "Call" button. Read-only here -- set by POST /api/calls's optional
+   * `callRequestId` (see startCall), never by this shape.
+   */
+  callRequestId: string | null;
+  callRequestStatus: CallRequestStatus | null;
+}
+
+/**
+ * One row of the customers list's call column -- the total plus just enough
+ * about the most recent call to describe it, fetched for a whole page of
+ * customers at once (see getCallSummariesForCustomers).
+ */
+export interface CustomerCallSummary {
+  customerId: string;
+  totalCalls: number;
+  lastCallAt: string;
+  /** null = that call was started but never finished (see `Call.status`). */
+  lastCallStatus: CallStatus | null;
+  lastCallDurationSeconds: number;
 }
 
 /**

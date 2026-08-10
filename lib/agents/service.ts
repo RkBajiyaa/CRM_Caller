@@ -48,6 +48,23 @@ export async function updateAgent(id: string, patch: UpdateAgentInput): Promise<
         ...(patch.isActive !== undefined && { isActive: patch.isActive }),
       },
     });
+
+    // Keep the denormalized display name honest. `Customer.assignedAgent` is
+    // a copy of this agent's name (see prisma/schema.prisma) that
+    // lib/customers/prisma-store.ts refreshes whenever a customer's
+    // assignment changes -- but renaming the agent itself used to leave every
+    // already-assigned customer showing the old name until it was reassigned.
+    // A second plain write, not a transaction (CLAUDE.md rule #11), and only
+    // when the name actually changed. This is what lets the customers list
+    // render the agent column straight from the customer row instead of
+    // fetching the whole agent directory on every page load.
+    if (patch.name !== undefined) {
+      await prisma.customer.updateMany({
+        where: { assignedAgentId: id },
+        data: { assignedAgent: row.name },
+      });
+    }
+
     return toDomain(row);
   } catch {
     return null;

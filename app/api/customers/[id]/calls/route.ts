@@ -19,6 +19,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Customer not found." }, { status: 404 });
   }
 
-  const [calls, stats] = [await listCallsForCustomer(id), await getCallStatsForCustomer(id)];
+  // Stats are derived from the calls just fetched -- they used to be computed
+  // by running the identical query again, which doubled this route's database
+  // round trips for no new information.
+  const calls = await listCallsForCustomer(id);
+  const stats = await getCallStatsForCustomer(id, calls);
   return NextResponse.json({ data: calls, stats });
 }

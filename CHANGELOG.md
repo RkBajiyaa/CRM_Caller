@@ -1778,3 +1778,199 @@ never checked against anything on read anymore.
   script) is the standard Vercel-recommended fix for this exact class of
   failure, but a live Vercel build should still be watched on the next
   deploy to confirm.
+
+---
+
+## 2026-08-10 — Audit pass: kill the customers-list N+1, normalized phone matching, call-lifecycle display, transcript display
+
+Scope: audit the existing, working CRM and improve it **without** redesigning
+it. No architecture was replaced, no endpoint was renamed or removed, and the
+CRM → Android call-request mechanism is untouched. Every change below is
+additive or a strictly-narrower rewrite of one function.
+
+**Files created:**
+- `lib/customers/phone.ts` — `phoneDigits()` / `phoneKey()`. Normalization
+  for *lookup only*; `Customer.phoneNumber` remains the source of truth and
+  is never rewritten.
+- `lib/call-requests/lifecycle.ts` — pure functions deriving one display
+  state (`QUEUED`/`DIALING`/`IN_PROGRESS`/`CONNECTED`/`NOT_ANSWERED`/
+  `FAILED`/`CANCELLED`/`UNKNOWN`/`NONE`) from the `CallRequest` + `Call` that
+  already exist. Nothing is stored; no second call system.
+- `prisma/migrations/20260809211453_add_phone_key_and_query_indexes/` —
+  hand-edited after `--create-only` to add the backfill and to create the
+  replacement indexes *before* dropping the ones they supersede.
+
+**Files modified:**
+- `prisma/schema.prisma` — added `Customer.phoneKey` (nullable, indexed);
+  added `@@index([crmEntryCreatedAt])` on Customer; replaced
+  `Call @@index([customerId])` with `@@index([customerId, startedAt])` and
+  `CallRequest @@index([status])` with `@@index([status, requestedAt])`
+  (each old index is a strict prefix of its replacement).
+- `lib/customers/prisma-store.ts` — maintain `phoneKey` on create/update;
+  exact-then-normalized lookup; all-digit search also matches `phoneKey`.
+- `lib/calls/service.ts` — new `getCallSummariesForCustomers()` (one raw
+  `DISTINCT ON` + partition-`COUNT` query per page); `getCallStatsForCustomer`
+  now accepts already-fetched calls; call payload additionally carries
+  recording duration/status, transcript text/language, and the linked call
+  request.
+- `lib/calls/types.ts` — the new fields above, plus `CustomerCallSummary`.
+- `lib/call-requests/service.ts` — `createCallRequest` de-duplicates while
+  `PENDING`; `listCallRequests` bounded (`limit`, default 200/max 500);
+  added `getOpenCallRequestsForCustomers()` and
+  `listCallRequestsForCustomer()`.
+- `lib/agents/service.ts` — renaming an agent now refreshes the denormalized
+  `Customer.assignedAgent` for that agent's customers.
+- `app/(app)/customers/page.tsx` — the N+1 removal (see below).
+- `app/(app)/customers/[id]/page.tsx` — stats from already-fetched calls;
+  `cache()` around the customer fetch shared with `generateMetadata`; Call
+  button in the header; "Call request" state card.
+- `app/api/call-requests/route.ts`, `app/api/customers/route.ts`,
+  `app/api/customers/lookup/route.ts`, `app/api/customers/[id]/calls/route.ts`.
+- `components/crm/CustomersExplorer.tsx` (+ CSS) — columns are now
+  Customer (name + agent) / Phone / Location / CRM entry / Calls / Last call /
+  Status / Actions; no `agents` prop; live call state on the row.
+- `components/crm/CallRequestButton.tsx` (+ CSS) — shows the server's view
+  ("Queued"/"Dialing"/"In progress"), stays clickable in every state,
+  `router.refresh()` after a request.
+- `components/crm/CallHistoryTable.tsx` (+ CSS) — transcript text shown in a
+  collapsed disclosure row; duration falls back to the recording's own
+  duration; "Outcome" wording.
+- `API_DOCUMENTATION.md`, `ANDROID_API_INTEGRATION.md` — see "contract" below.
+
+**Files deleted:**
+- None.
+
+**Decisions made:**
+- **The customers list was doing 2 + N queries.** It called
+  `getCallStatsForCustomer` once per row — each one a *full* call-history
+  query with four joins — to render two numbers per row. Measured directly
+  against the live Neon database: 25 of those took **6.1 s**, out of a
+  ~11 s page. Replaced with a single aggregate query for the whole page.
+- **`Promise.all` is not the fix here, and was measured to be actively
+  worse.** Four trivial queries: ~1.0 s sequential, ~2.6 s wrapped in
+  `Promise.all` — this project's Neon adapter effectively serializes
+  concurrent queries and pays connection setup per one. So the only lever
+  that works is *fewer queries*, and the page is now a fixed four
+  (customers, count, call summaries, open call requests) regardless of page
+  size. The pre-existing sequential `[await a, await b]` idiom was left
+  sequential deliberately, not "fixed" into `Promise.all`.
+- **Phone matching was a live defect, not a theoretical one.** Android
+  normalizes a number before `GET /api/customers/lookup`; the CRM matched
+  exactly. A customer stored as `"+91 90000 00001"` was therefore never
+  found for `"+919000000001"`, so no `Call` row was created and the call
+  vanished from the CRM. The database showed exactly this: every call request
+  for a spaced-number customer was stranded at `ACCEPTED` with `callId:
+  null`, while the one customer stored already-normalized
+  (`+919335274362`) was the only one with linked calls. Fixed **on the CRM
+  side only** — Android is unchanged and sends exactly what it always sent.
+- **A stored `phoneKey` column, not an expression index.** Prisma cannot
+  represent expression indexes in `schema.prisma`, so a hand-written one
+  would show up as drift and a later `migrate dev` would generate a `DROP`.
+  A plain indexed column keeps the schema the single source of truth.
+  Deliberately **not** unique: existing data can already collide on the last
+  10 digits, and a failed migration would be worse than a deterministic
+  tie-break (oldest CRM entry wins).
+- **`CallRequest.status = COMPLETED` means "dialed", not "call finished".**
+  Verified in `ConbunCall_V4`'s `CallSessionTracker.onCallInitiated`: Android
+  PATCHes `COMPLETED` the instant `POST /api/calls` returns. Rather than
+  change either side, the CRM derives what it displays by combining the
+  request's status with the linked `Call.status`. Documented in both API
+  docs so the two projects share one reading of the contract.
+- **Did NOT change:** the call-request endpoints' paths, methods, request
+  bodies, or status vocabulary; `POST /api/calls`'s `callRequestId`
+  behaviour; `PATCH /api/calls/{id}`; the transcript/recording endpoints;
+  the storage abstraction; authentication (still none, by instruction); the
+  Neon/Prisma adapter setup and its no-interactive-transactions constraint.
+- **Deliberately not attempted:** switching the Neon adapter to HTTP mode to
+  cut cold-start latency (that is an architecture change to a working
+  connection layer), and rewriting `dbListCustomers` in raw SQL to fold its
+  `count` into the page query (invasive, small payoff).
+
+**API changes (all backward compatible):**
+- `GET /api/customers/lookup` — exact match first, then last-10-digits
+  fallback. Still 404s for unknown numbers; still never creates a customer.
+- `POST /api/customers` — the `409` duplicate check is now normalized, so
+  the same number in a different format is rejected instead of creating an
+  ambiguous second row. Response shape unchanged.
+- `POST /api/call-requests` — idempotent while `PENDING`: returns the
+  existing request with `200` instead of queueing a duplicate with `201`.
+  Body identical. Android never POSTs here.
+- `GET /api/call-requests` — new optional `limit` (default 200, max 500),
+  oldest-first as before.
+- `GET /api/customers/{id}/calls` and `GET /api/calls/{id}` — added
+  `recordingDurationSeconds`, `recordingStatus`, `transcriptText`,
+  `transcriptLanguage`, `callRequestId`, `callRequestStatus`. Nothing
+  renamed or removed.
+- `GET /api/customers` — an all-digits `q` of 4+ digits also matches the
+  normalized phone key.
+
+**Database/schema changes:**
+- `customers.phone_key TEXT NULL`, backfilled for all 30 existing rows with
+  `NULLIF(RIGHT(REGEXP_REPLACE(phone_number,'[^0-9]','','g'),10),'')`.
+- New indexes: `customers(phone_key)`, `customers(crm_entry_created_at)`,
+  `calls(customer_id, started_at)`, `call_requests(status, requested_at)`.
+- Dropped as superseded (prefix-covered by the composites above):
+  `calls_customer_id_idx`, `call_requests_status_idx`.
+
+**Tests/builds performed:**
+- `npx prisma migrate dev --create-only` → hand-edited SQL → `npx prisma
+  migrate dev` → applied to the real Neon database. `npx prisma generate`.
+- `npx tsc --noEmit` → exit 0. `npm run lint` → clean. `npm run build` →
+  succeeded twice (before and after the last round of changes); all 22
+  routes present, every API route dynamic (`ƒ`).
+- **Full CRM → Android call-request lifecycle, twice, by `curl` against the
+  live Neon database** — once on `next dev`, then again on the production
+  build (`npm run start`) after the final build: `POST /api/call-requests` →
+  `GET ?status=PENDING` (own request present) → `PATCH ACCEPTED` → `POST
+  /api/calls` with `callRequestId` → `PATCH COMPLETED` + `callId` → `PATCH
+  /api/calls/{id}` finish → `POST /recording` → `POST /transcript` → `GET
+  /api/calls/{id}` showing the whole linked record.
+- `PATCH /api/calls/{id}` accepted all three `Instant.toString()` shapes
+  Java can emit (`...Z`, `...123Z`, `...123456789Z`) — 200 each.
+- Phone matching: `+91 98765 43299` stored, then looked up as
+  `+919876543299`, `9876543299`, `09876543299`, and the exact string — all
+  resolved to the same customer; an unrelated number still returned 404 and
+  created nothing; a duplicate `POST /api/customers` in another format
+  returned 409 naming the existing customer.
+- Rendered-HTML checks: transcript text present on the detail page; "Call
+  request" card and "Connected" state present; "Queued" appears on both list
+  and detail while a request is `PENDING`; "Dialing" appears for the real
+  pre-existing stranded `ACCEPTED` rows; digit-only search finds a
+  spaced-number customer.
+- Timings, production build, same machine/database. `/customers`: **~11 s →
+  1.3–1.8 s** warm. `/customers/{id}`: ~1.8–2.0 s. `/customers/new`:
+  ~0.3–0.4 s. `GET /api/call-requests?status=PENDING`: ~0.3 s.
+  `GET /api/customers/lookup`: ~0.6–0.7 s (two round trips when the exact
+  match misses and the normalized fallback runs).
+- Test data cleaned up: the one audit customer was deleted with
+  `npx prisma db execute` (id + phone number both matched in the `WHERE`),
+  and cascade removal of its call/request/transcript was verified by 404s.
+  Customer count back to the pre-audit 30.
+
+**Actual results:**
+- The protected CRM → Android flow behaves identically at every step; the
+  only behavioural difference is that a second click while a request is
+  still `PENDING` no longer queues a duplicate.
+- The stranded-`ACCEPTED` rows already in the database now render as
+  "Dialing" in the CRM instead of being invisible — the pre-existing data
+  problem is visible rather than silently fixed.
+
+**Incomplete / still requiring verification:**
+- **No real Android device test was performed in this pass. No call was
+  placed on a phone.** Everything above is `curl` + rendered-HTML
+  verification against the real database. The phone-matching fix in
+  particular should be confirmed on-device: place a CRM call to a customer
+  whose number is stored with spaces (e.g. `+91 90000 00001`) and confirm a
+  `Call` row now appears in that customer's history, which is exactly what
+  used to fail.
+- The new indexes are **created and verified present**, but `EXPLAIN` still
+  shows sequential scans — at 30 rows Postgres correctly prefers them. Their
+  value is for the "many customers" requirement and is unproven at this data
+  size.
+- Neon cold start (~2.5–9 s after the compute auto-suspends) is unchanged
+  and is not a code problem; it dominates the first request after an idle
+  period.
+- Not deployed to Vercel in this pass; production configuration was reviewed
+  (no `localhost`/LAN IP/dev-only env var/filesystem dependency anywhere in
+  `app/`, `lib/`, `components/`; only `DATABASE_URL` and `NODE_ENV` are read)
+  but the live deployment was not exercised.

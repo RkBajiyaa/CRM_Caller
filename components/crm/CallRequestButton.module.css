@@ -6,6 +6,7 @@
   padding: 4px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
+  white-space: nowrap;
 }
 
 .button:hover:not(:disabled) {
@@ -18,9 +19,27 @@
   cursor: not-allowed;
 }
 
-.requested {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-success);
-  padding: 4px 10px;
+/* Slightly larger tap target for the Customer Detail header, where the
+   button stands on its own rather than inside a dense table row. */
+.md {
+  font-size: 13px;
+  padding: 7px 14px;
+}
+
+/* A call request for this customer is already in flight -- distinct from the
+   normal "Call" affordance without turning into a second badge component. */
+.active {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  border-color: var(--color-warning-soft);
+}
+
+.active:hover:not(:disabled) {
+  background: var(--color-warning);
+  color: #fff;
+}
+
+.error {
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
 }

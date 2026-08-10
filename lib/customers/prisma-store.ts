@@ -11,6 +11,7 @@
 import { Prisma } from "@/lib/generated/prisma/client";
 import type { CustomerModel } from "@/lib/generated/prisma/models";
 import { prisma } from "@/lib/db/prisma";
+import { phoneDigits, phoneKey } from "@/lib/customers/phone";
 import type {
   Customer,
   CreateCustomerInput,
@@ -50,6 +51,11 @@ export async function dbListCustomers(params: ListCustomersParams): Promise<List
   const page = Math.max(1, params.page ?? 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, params.pageSize ?? DEFAULT_PAGE_SIZE));
 
+  // A search that's all digits is a phone search -- match it against the
+  // normalized key too, so typing "9335274362" finds a customer stored as
+  // "+91 93352 74362" (the raw-column `contains` below can't, the spaces are
+  // in the way). Non-digit searches skip this entirely.
+  const queryDigits = params.q ? phoneDigits(params.q) : "";
   const where: Prisma.CustomerWhereInput = {
     ...(params.status && { status: params.status }),
     ...(params.assignedAgentId && { assignedAgentId: params.assignedAgentId }),
@@ -59,6 +65,7 @@ export async function dbListCustomers(params: ListCustomersParams): Promise<List
         { phoneNumber: { contains: params.q, mode: "insensitive" } },
         { location: { contains: params.q, mode: "insensitive" } },
         { assignedAgent: { contains: params.q, mode: "insensitive" } },
+        ...(queryDigits.length >= 4 ? [{ phoneKey: { contains: queryDigits } }] : []),
       ],
     }),
   };
@@ -91,9 +98,37 @@ export async function dbGetCustomerById(id: string): Promise<Customer | null> {
   return row ? toDomain(row) : null;
 }
 
+/**
+ * Two-step, exact-first lookup.
+ *
+ * Step 1 is the original behaviour, byte-for-byte: a unique-index hit on the
+ * stored `phoneNumber`. Anything that resolved before this function changed
+ * still resolves here, to the same row, in one query.
+ *
+ * Step 2 only runs when step 1 misses, and matches on the normalized
+ * `phoneKey` instead (see lib/customers/phone.ts). That is what lets Android
+ * -- which normalizes numbers its own way before calling
+ * `GET /api/customers/lookup` -- find a customer the CRM stored as
+ * "+91 90000 00001". Before this, those lookups 404'd and the call was never
+ * recorded against the customer at all.
+ *
+ * Ambiguity (two customers whose numbers agree on the last 10 digits) is
+ * resolved deterministically to the oldest CRM entry rather than left to
+ * row order, so repeated lookups of the same number always return the same
+ * customer.
+ */
 export async function dbFindCustomerByPhoneNumber(phoneNumber: string): Promise<Customer | null> {
-  const row = await prisma.customer.findUnique({ where: { phoneNumber } });
-  return row ? toDomain(row) : null;
+  const exact = await prisma.customer.findUnique({ where: { phoneNumber } });
+  if (exact) return toDomain(exact);
+
+  const key = phoneKey(phoneNumber);
+  if (!key) return null;
+
+  const normalized = await prisma.customer.findFirst({
+    where: { phoneKey: key },
+    orderBy: { crmEntryCreatedAt: "asc" },
+  });
+  return normalized ? toDomain(normalized) : null;
 }
 
 /** `id` and `crmEntryCreatedAt` are never set here -- the schema's `@default(uuid())` / `@default(now())` generate them (CLAUDE.md rule #5). */
@@ -103,6 +138,8 @@ export async function dbCreateCustomer(input: CreateCustomerInput): Promise<Cust
     data: {
       name: input.name,
       phoneNumber: input.phoneNumber,
+      // Derived, never client-supplied -- same rule as id/crmEntryCreatedAt.
+      phoneKey: phoneKey(input.phoneNumber),
       location: input.location ?? null,
       assignedAgentId: input.assignedAgentId ?? null,
       assignedAgent,
@@ -124,7 +161,12 @@ export async function dbUpdateCustomer(id: string, patch: UpdateCustomerInput): 
       where: { id },
       data: {
         ...(patch.name !== undefined && { name: patch.name }),
-        ...(patch.phoneNumber !== undefined && { phoneNumber: patch.phoneNumber }),
+        // phoneKey is recomputed with phoneNumber and only with phoneNumber,
+        // so the two can never drift apart.
+        ...(patch.phoneNumber !== undefined && {
+          phoneNumber: patch.phoneNumber,
+          phoneKey: phoneKey(patch.phoneNumber),
+        }),
         ...(patch.location !== undefined && { location: patch.location }),
         ...(patch.assignedAgentId !== undefined && { assignedAgentId: patch.assignedAgentId, assignedAgent }),
         ...(patch.accountCreatedAt !== undefined && {

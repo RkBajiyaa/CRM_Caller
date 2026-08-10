@@ -4,19 +4,22 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import type { Customer, CustomerStatus } from "@/lib/customers/types";
-import type { Agent } from "@/lib/agents/types";
 import { Avatar } from "@/components/crm/Avatar";
 import { StatusBadge } from "@/components/crm/StatusBadge";
 import { StateMessage } from "@/components/crm/StateMessage";
 import { CallRequestButton } from "@/components/crm/CallRequestButton";
 import { LinkButton } from "@/components/ui/Button";
-import { formatDate, shortId } from "@/lib/format";
+import { formatDate, formatDuration } from "@/lib/format";
 import { CUSTOMER_STATUSES } from "@/lib/customers/types";
+import { CALL_LIFECYCLE_LABELS, isCallLifecycleActive, type CallLifecycleState } from "@/lib/call-requests/lifecycle";
 import styles from "./CustomersExplorer.module.css";
 
 export interface CustomerRow extends Customer {
   totalCalls: number;
   lastCallAt: string | null;
+  lastCallDurationSeconds: number | null;
+  /** Derived server-side from this customer's open call request / last call -- see lib/call-requests/lifecycle.ts. */
+  lifecycle: CallLifecycleState;
 }
 
 interface Pagination {
@@ -41,21 +44,24 @@ const STATUS_LABELS: Record<CustomerStatus, string> = {
  * over an already-paginated slice, which would silently miss matches on
  * other pages.
  *
- * Column set is deliberately narrow (Customer / Phone / Agent / Calls /
- * Last contact / Status / Actions) so it fits a normal desktop viewport
- * without horizontal scrolling. Customer ID lives in a secondary line +
- * tooltip on the Customer cell instead of its own column; location and CRM
- * entry date live on the detail page only.
+ * Columns are the ones an agent actually acts on -- who, what number, where,
+ * when they entered the CRM, how the calling has gone, and the two buttons --
+ * on one line each, no horizontal scroll, at the same 13.5px density as the
+ * rest of the CRM. The customer id moved to the name's tooltip rather than
+ * taking a second line in every row; it's shown in full on the detail page.
+ *
+ * The agent name is read straight off the customer row (`assignedAgent`, kept
+ * in sync by lib/agents/service.ts and lib/customers/prisma-store.ts) rather
+ * than by fetching the whole agent directory on every page load -- one fewer
+ * query per render, which is the dominant cost here (see the page's comment).
  */
 export function CustomersExplorer({
   rows,
-  agents,
   pagination,
   initialQuery,
   initialStatus,
 }: {
   rows: CustomerRow[];
-  agents: Agent[];
   pagination: Pagination;
   initialQuery: string;
   initialStatus?: CustomerStatus;
@@ -94,8 +100,6 @@ export function CustomersExplorer({
     router.push(`${pathname}?${next.toString()}`);
   }
 
-  const agentById = new Map(agents.map((a) => [a.id, a]));
-
   return (
     <div>
       <div className={styles.headerRow}>
@@ -127,7 +131,7 @@ export function CustomersExplorer({
             <input
               type="search"
               className={styles.search}
-              placeholder="Search name, phone, agent..."
+              placeholder="Search name, phone, location, agent..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               aria-label="Search customers"
@@ -160,9 +164,10 @@ export function CustomersExplorer({
                 <tr>
                   <th className={styles.colCustomer}>Customer</th>
                   <th className={styles.colPhone}>Phone</th>
-                  <th className={styles.colAgent}>Agent</th>
+                  <th className={styles.colLocation}>Location</th>
+                  <th className={styles.colEntry}>CRM entry</th>
                   <th className={styles.colCalls}>Calls</th>
-                  <th className={styles.colLastContact}>Last contact</th>
+                  <th className={styles.colLastCall}>Last call</th>
                   <th className={styles.colStatus}>Status</th>
                   <th className={styles.colActions}>
                     <span className={styles.srOnly}>Actions</span>
@@ -173,13 +178,11 @@ export function CustomersExplorer({
                 {rows.map((row) => (
                   <tr key={row.id}>
                     <td>
-                      <Link href={`/customers/${row.id}`} className={styles.customerCell}>
+                      <Link href={`/customers/${row.id}`} className={styles.customerCell} title={`Customer ID: ${row.id}`}>
                         <Avatar name={row.name} size="sm" />
                         <span className={styles.customerText}>
                           <span className={styles.nameLink}>{row.name}</span>
-                          <span className={styles.customerMeta} title={row.id}>
-                            {shortId(row.id)}
-                          </span>
+                          <span className={styles.customerMeta}>{row.assignedAgent ?? "Unassigned"}</span>
                         </span>
                       </Link>
                     </td>
@@ -188,16 +191,19 @@ export function CustomersExplorer({
                         {row.phoneNumber}
                       </Link>
                     </td>
-                    <td className={styles.muted}>
-                      {row.assignedAgentId ? (agentById.get(row.assignedAgentId)?.name ?? row.assignedAgent) : "Unassigned"}
+                    <td className={styles.muted} title={row.location ?? undefined}>
+                      {row.location ?? "--"}
                     </td>
+                    <td className={styles.muted}>{formatDate(row.crmEntryCreatedAt)}</td>
                     <td className={styles.callsCell}>{row.totalCalls}</td>
-                    <td className={styles.muted}>{formatDate(row.lastCallAt)}</td>
+                    <td>
+                      <LastCallCell row={row} />
+                    </td>
                     <td>
                       <StatusBadge status={row.status} />
                     </td>
                     <td className={styles.actionsCell}>
-                      <CallRequestButton customerId={row.id} />
+                      <CallRequestButton customerId={row.id} lifecycle={row.lifecycle} />
                       <Link href={`/customers/${row.id}`} className={styles.viewLink}>
                         View
                       </Link>
@@ -236,5 +242,26 @@ export function CustomersExplorer({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * One line, never two: while something is actually in flight the state is
+ * what matters, otherwise the date of the last call (with its duration in the
+ * tooltip) is. Never invents an outcome -- a customer with no calls shows a
+ * dash, not "No answer".
+ */
+function LastCallCell({ row }: { row: CustomerRow }) {
+  if (isCallLifecycleActive(row.lifecycle)) {
+    return <span className={styles.liveState}>{CALL_LIFECYCLE_LABELS[row.lifecycle]}</span>;
+  }
+  if (!row.lastCallAt) return <span className={styles.muted}>--</span>;
+
+  const outcome = CALL_LIFECYCLE_LABELS[row.lifecycle];
+  const duration = row.lastCallDurationSeconds ? formatDuration(row.lastCallDurationSeconds) : null;
+  return (
+    <span className={styles.muted} title={duration ? `${outcome} -- ${duration}` : outcome}>
+      {formatDate(row.lastCallAt)}
+    </span>
   );
 }
