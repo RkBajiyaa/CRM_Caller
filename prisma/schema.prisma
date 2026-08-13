@@ -228,8 +228,25 @@ model Call {
   status CallStatus?
 
   startedAt       DateTime  @map("started_at")
+
+  /// When the call was actually picked up, if it ever was. Distinct from
+  /// `startedAt` (when dialling began) and from `endedAt`: the gap between
+  /// `startedAt` and this is ring time, which is the only way to tell a call
+  /// that rang for 40 seconds and connected from one that connected instantly.
+  /// Nullable and optional everywhere -- Android does not send it today (its
+  /// outcome comes from the OS CallLog, which has no answer timestamp), so
+  /// every existing row and every existing client stays valid without it.
+  answeredAt      DateTime? @map("answered_at")
   endedAt         DateTime? @map("ended_at")
   durationSeconds Int       @default(0) @map("duration_seconds")
+
+  /// Why a call did not connect, in the reporting client's own words
+  /// ("Call rejected by the other side", "No network", a carrier cause code).
+  /// Free text on purpose: the closed `CallStatus` enum says *what* happened
+  /// and stays the thing code branches on; this only ever adds detail a human
+  /// reads. Nullable -- absent means "no reason was reported", never "no
+  /// reason existed".
+  failureReason String? @map("failure_reason")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

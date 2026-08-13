@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { listCustomers } from "@/lib/customers/service";
-import { getCallSummariesForCustomers } from "@/lib/calls/service";
-import { getOpenCallRequestsForCustomers } from "@/lib/call-requests/service";
+import { getCustomerCallOverviews } from "@/lib/calls/service";
 import { callLifecycleState } from "@/lib/call-requests/lifecycle";
 import { CustomersExplorer, type CustomerRow } from "@/components/crm/CustomersExplorer";
 import type { CustomerStatus } from "@/lib/customers/types";
@@ -30,10 +29,11 @@ interface PageProps {
 // effectively serializes queries (measured -- four trivial queries take ~1.0s
 // sequentially and ~2.6s wrapped in Promise.all), so page latency is close to
 // `round-trip latency x number of queries` and parallelism is not an escape
-// hatch. Rendering a page of customers is therefore held to a fixed four
-// queries regardless of page size: the customers, their count, one batched
-// call summary, and one batched open-call-request lookup. It used to be
-// 2 + 25 -- see CHANGELOG.md 2026-08-10.
+// hatch. Rendering a page of customers is therefore held to a fixed three
+// queries regardless of page size: the customers, their count, and one batched
+// per-customer call/request overview. It was 2 + 25 before 2026-08-10, then 4;
+// the fourth (a separate open-call-request lookup) is now a LATERAL inside the
+// overview query, since it was keyed by the same page of customer ids.
 export default async function CustomersPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const q = params.q?.trim() || undefined;
@@ -43,14 +43,14 @@ export default async function CustomersPage({ searchParams }: PageProps) {
   const result = await listCustomers({ q, status, page });
   const customerIds = result.data.map((customer) => customer.id);
 
-  // Call activity for the whole page in one query each, instead of a full
-  // call-history fetch per row.
-  const summaries = await getCallSummariesForCustomers(customerIds);
-  const openRequests = await getOpenCallRequestsForCustomers(customerIds);
+  // Call activity + current open call request for the whole page in one query,
+  // instead of a full call-history fetch per row.
+  const overviews = await getCustomerCallOverviews(customerIds);
 
   const rows: CustomerRow[] = result.data.map((customer) => {
-    const summary = summaries.get(customer.id);
-    const openRequest = openRequests.get(customer.id);
+    const overview = overviews.get(customer.id);
+    const summary = overview?.summary;
+    const openRequest = overview?.openRequest;
     return {
       ...customer,
       totalCalls: summary?.totalCalls ?? 0,

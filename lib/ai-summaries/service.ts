@@ -32,10 +32,29 @@ export async function getAiSummaryByCallId(callId: string): Promise<AiSummary | 
   return row ? toDomain(row) : null;
 }
 
-/** find-then-create-or-update, not upsert() -- see lib/customers/prisma-store.ts. */
+/**
+ * find-then-create-or-update, not upsert() -- see lib/customers/prisma-store.ts.
+ *
+ * Summarization is the last and most failure-prone stage of the pipeline, and
+ * it is the one that must never be able to damage the stages before it. Two
+ * properties make that true, and both are load-bearing:
+ *
+ * - Nothing here touches the call, the recording or the transcript. A summary
+ *   marked FAILED leaves every one of them exactly as it was.
+ * - A retry that succeeds clears the earlier FAILED: real summary text with no
+ *   explicit status means DONE on this update path, as it already did on the
+ *   create path below. Without that, a summary that failed once and was then
+ *   regenerated successfully stayed FAILED forever while holding the finished
+ *   text.
+ *
+ * And in the other direction, a submission that carries no text never
+ * overwrites text that is already stored, so `{"processingStatus":"FAILED"}`
+ * records a failed attempt without destroying a summary that had worked.
+ */
 export async function submitAiSummary(callId: string, input: SubmitAiSummaryInput): Promise<AiSummary> {
   const existing = await prisma.aiSummary.findUnique({ where: { callId } });
-  const generatedAt = input.summaryText ? new Date() : undefined;
+  const arrivedWithText = Boolean(input.summaryText && input.summaryText.trim());
+  const generatedAt = arrivedWithText ? new Date() : undefined;
 
   if (existing) {
     const row = await prisma.aiSummary.update({
@@ -49,7 +68,9 @@ export async function submitAiSummary(callId: string, input: SubmitAiSummaryInpu
         ...(input.followUpRequired !== undefined && { followUpRequired: input.followUpRequired }),
         ...(input.modelProvider !== undefined && { modelProvider: input.modelProvider }),
         ...(input.modelName !== undefined && { modelName: input.modelName }),
-        ...(input.processingStatus !== undefined && { processingStatus: input.processingStatus }),
+        ...(input.processingStatus !== undefined
+          ? { processingStatus: input.processingStatus }
+          : arrivedWithText && { processingStatus: "DONE" as const }),
         ...(generatedAt && { generatedAt }),
       },
     });
@@ -67,7 +88,7 @@ export async function submitAiSummary(callId: string, input: SubmitAiSummaryInpu
       followUpRequired: input.followUpRequired ?? false,
       modelProvider: input.modelProvider ?? null,
       modelName: input.modelName ?? null,
-      processingStatus: input.processingStatus ?? (input.summaryText ? "DONE" : "PENDING"),
+      processingStatus: input.processingStatus ?? (arrivedWithText ? "DONE" : "PENDING"),
       generatedAt: generatedAt ?? null,
     },
   });

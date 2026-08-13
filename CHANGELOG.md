@@ -1974,3 +1974,534 @@ additive or a strictly-narrower rewrite of one function.
   (no `localhost`/LAN IP/dev-only env var/filesystem dependency anywhere in
   `app/`, `lib/`, `components/`; only `DATABASE_URL` and `NODE_ENV` are read)
   but the live deployment was not exercised.
+
+---
+
+## 2026-08-11 — Call-result contract, call-detail UI, and the `include` fan-out
+
+Incremental improvement pass on the working CRM. Nothing was redesigned, no
+working functionality was removed, and the Android calling flow was preserved
+end to end — `ConbunCall_V4` was read as reference only and **not modified**
+(CLAUDE.md §1/§3.9).
+
+**Files created:**
+- `SUMMARY_CONTRACT.md` — what a call summary must contain, how it must be
+  grounded in the transcript, and the English-only output rule for
+  Hindi/English calls. Specification for whoever *generates* summaries (today
+  Conbun Call's own OpenAI provider); the CRM stores and displays without
+  validating, and still fabricates nothing.
+- `prisma/migrations/20260810205139_add_call_answered_at_and_failure_reason/`
+  — two nullable columns on `calls`, nothing else.
+
+**Files modified:**
+- `prisma/schema.prisma` — `Call.answeredAt`, `Call.failureReason`.
+- `lib/calls/service.ts` — rewritten around hand-written joined SQL; new
+  `callExists`, `getCustomerCallOverview`, `getCustomerCallOverviews`.
+- `lib/calls/types.ts`, `lib/calls/validation.ts` — new optional fields.
+- `lib/call-requests/service.ts` — single-statement conditional create;
+  `getOpenCallRequestsForCustomers` folded into `getCustomerCallOverviews`.
+- `lib/actions/service.ts` — `listActionsForCustomer` joins instead of
+  `include`.
+- `lib/transcripts/service.ts`, `lib/ai-summaries/service.ts` — retry
+  semantics fix (see below).
+- `app/api/calls/route.ts`, `app/api/calls/[id]/{transcript,summary,recording}/route.ts`,
+  `app/api/customers/[id]/calls/route.ts`.
+- `app/(app)/customers/page.tsx`, `app/(app)/customers/[id]/page.tsx` (+ its
+  CSS module), `components/crm/CallHistoryTable.tsx` (+ CSS),
+  `components/crm/StatCard.tsx` (+ CSS, new `compact` variant).
+- `API_DOCUMENTATION.md`, `ANDROID_API_INTEGRATION.md`.
+
+**Files deleted:**
+- None.
+
+**Decisions made:**
+
+1. **The real bottleneck was Prisma's `include`, not query count in the
+   abstract.** Prisma does not join `include`d relations — it issues one extra
+   SQL statement per relation. With the five relations a call needs that is
+   six serialized round trips for one logical read, and this project's Neon
+   adapter serializes statements (the same property that makes `Promise.all`
+   *slower* here — 2026-08-10 entry). Measured with query logging against the
+   live database before changing anything:
+
+   ```
+   call.findMany (no include)     386 ms   1 SQL
+   call.findMany (5 includes)    2766 ms   6 SQL
+   action.findMany (1 include)    630 ms   2 SQL
+   ```
+
+   Every call read is now one hand-written `LEFT JOIN` query. Safe by
+   construction: all five relations are to-one (`@unique` on `call_id`, or a
+   plain FK), so a join cannot duplicate a call row. Enum columns are cast to
+   `text` for the same adapter reason `getCallSummariesForCustomers` already
+   documented.
+
+2. **`answeredAt` and `failureReason` added rather than reused.** Neither is
+   derivable from what exists: `durationSeconds > 0` says a call connected but
+   never when, and `CallStatus` says *what* happened but carries no detail.
+   Both nullable, both optional everywhere, never inferred — the CRM will not
+   guess an answer time from a duration. `ConbunCall_V4` sends neither today
+   and is unaffected.
+
+3. **Deliberately did NOT add a "CRM sync state" column.** The requested
+   `SYNCED / PENDING / FAILED` vocabulary describes whether *Android* has
+   pushed a stage to the CRM — a fact only the phone can know, and one it
+   already tracks (`CrmCallActivityRepository`, `BackendSyncScheduler`'s retry
+   queue). From the CRM's side, the row existing *is* the synced state; a
+   column here could only ever be a second, always-`SYNCED` copy — exactly the
+   duplicate source of truth the rules forbid.
+
+4. **Deliberately did NOT add a partial unique index** on
+   `call_requests (customer_id) WHERE status = 'PENDING'`. It would close the
+   duplicate-request race completely, but Prisma cannot express a partial
+   unique index in `schema.prisma`, so schema and database would permanently
+   disagree about an index Prisma can't see — a bad trade for a project whose
+   CLAUDE.md tells every session to run `prisma migrate dev`. Instead the
+   pending check moved *inside* the `INSERT` (`INSERT ... SELECT ... WHERE NOT
+   EXISTS`), shrinking the race window from a full network round trip (~350 ms)
+   to the statement itself, and dropping the new-request path from three
+   statements to one. Reported as a residual risk rather than claimed as a
+   guarantee.
+
+5. **Status vocabulary unchanged.** No existing status was renamed. The
+   requested QUEUED/DIALING/RINGING/CONNECTED/... vocabulary is still *derived*
+   by `lib/call-requests/lifecycle.ts` from the two records that already
+   describe it. RINGING is still not represented, honestly: nothing on either
+   side reports it — Android marks a request `COMPLETED` at dial time and the
+   OS `CallLog` has no ring event — so inventing the state would mean
+   displaying something no one measured.
+
+6. **Call-detail UI: same visual language, different proportions.** The
+   customer profile moved from a 300px sticky sidebar (a quarter of the width,
+   the full height of the page) into a compact band across the top; the
+   separate "Call request" card folded into that band as one line of state.
+   The freed width went to call history, which gained a per-row expander
+   showing that call's timings, call request, recording metadata, transcript,
+   summary and follow-up in place. Same `Card`/`Badge`/`Avatar` primitives,
+   same tokens, same 13px table density — no redesign.
+
+7. **Bounded the call history, kept the stats unbounded.** The detail page and
+   `GET /api/customers/{id}/calls` used to load every call a customer ever had,
+   transcript text included, and then count six numbers from it in JavaScript.
+   The list is now the latest 25 (`?limit=`, max 200) while the aggregates are
+   computed in Postgres over *all* calls, in the same statement. A `truncated`
+   flag says when the list is a subset.
+
+8. **Retry semantics fixed for transcripts and summaries** (a real bug this
+   pass's tests found, not a refactor): submitting real text with no explicit
+   `processingStatus` now clears an earlier `FAILED` on the *update* path, as
+   it already did on create. Before, a transcript or summary that failed once
+   and then succeeded kept `FAILED` forever while holding the finished text.
+   The opposite direction was already correct and stays correct — a
+   `{"processingStatus":"FAILED"}` submission carries no text and so never
+   erases a stage that had worked.
+
+**Tests/builds performed:**
+- `npx tsc --noEmit`, `npm run lint`, `npm run build` — all clean.
+- `npx prisma migrate dev` — applied to the real Neon database.
+- Service-layer equivalence harness against the live database: created a real
+  call + transcript + summary + recording, compared the new joined loader
+  field-by-field against the old Prisma `include` result, then deleted the
+  fixtures. ~60 assertions, all passing — including `text[]` (`keyPoints`)
+  round-tripping through `$queryRaw` with commas and quotes intact, stats
+  matching a plain count, bounded reads keeping full-history stats, and
+  batched open-call-request lookups matching the previous implementation
+  customer by customer.
+- HTTP lifecycle suite against `npm run start`, walking the Android flow in
+  order: lookup (four number formats) → Call button → poll → accept → start →
+  finish → recording → transcript → summary → pages. **62 of 63 checks pass.**
+- Statement-count measurement with Prisma query logging, before vs after.
+- Before/after page latency measured over HTTP by stashing this pass's changes,
+  rebuilding at `HEAD`, and measuring the same routes.
+
+**Actual results:**
+
+SQL statements per request (the metric that matters — the adapter serializes
+them, and wall-clock from this machine swings ±300 ms per round trip):
+
+| | before | after |
+|---|---|---|
+| customer detail page | 10 | 4 |
+| customers list page (25 rows) | 4 | 3 |
+| `GET /api/customers/{id}/calls` | 7 | 2 |
+| `PATCH /api/calls/{id}` — the call result | 6 | 2 |
+| `POST /api/calls` — call start | 7 | 3 |
+| `POST /api/calls/{id}/transcript` | 8 | 3 |
+| `POST /api/calls/{id}/recording` | 8 | 3 |
+| `POST /api/calls/{id}/summary` | 8 | 3 |
+| `POST /api/call-requests` — Call button, new request | 3 | 1 |
+
+Wall clock over HTTP, mean of 5, same machine and same data, `HEAD` vs this
+pass:
+
+| route | before | after |
+|---|---|---|
+| `GET /customers` | 1463 ms | 1221 ms |
+| `GET /customers/{id}` | 2463 ms | 1705 ms |
+| `GET /api/customers/{id}/calls` | 1874 ms | 1470 ms |
+| `GET /api/call-requests?status=PENDING` | 305 ms | 377 ms |
+
+The Android poll is untouched code and the difference is noise (the framework
+floor, `/api/health`, measured 7 ms before and 6 ms after). Wall-clock gains
+are smaller than the statement counts suggest because this dev machine is far
+from the Neon region and per-statement latency varies from 265 ms to 967 ms
+between identical trivial queries; the statement counts are the durable
+result, and they should show up larger on Vercel where the round trip is
+short and consistent.
+
+Idempotency, verified live: five simultaneous `POST /api/call-requests` for
+one customer → exactly one `PENDING` row; three concurrent service-level
+calls → one request id. Sequential repeat presses still return `200` with the
+existing request, as before.
+
+Independence, verified live: with a call `ANSWERED` (137 s) plus a registered
+recording and a stored transcript, marking the summary `FAILED` left the call,
+its duration, the recording and the transcript intact and flagged only the
+summary; marking the transcript `FAILED` did not erase its text; a later
+successful summary submission cleared the `FAILED`.
+
+The database was left exactly as it was found (32 customers, 3 agents, 4
+calls, 18 call requests, 1 transcript, 0 recordings, 0 summaries, 0 pending
+requests) — every fixture created during testing was deleted.
+
+**Incomplete / still requiring verification:**
+
+- **No real-device test was performed this pass.** No Android code was
+  changed and no phone was involved; the CRM↔Android contract was exercised
+  over HTTP against a real server with exactly the payloads
+  `ConbunCall_V4` sends, which is not the same thing as a device run.
+- **One known failing check, pre-existing and unrelated:**
+  `GET /customers/<unknown-id>` renders the correct "Customer not found" page
+  but with HTTP `200` instead of `404`. Confirmed identical on `HEAD` by
+  rebuilding the pre-change code and measuring it — Next.js has already begun
+  streaming the response by the time `notFound()` is reached. Not introduced
+  here and deliberately not chased, since it is a framework/streaming
+  behaviour rather than an application bug.
+- **The duplicate-request race is narrowed, not eliminated** — see decision 4.
+- **14 `ACCEPTED` call requests with no linked call** still sit in the
+  production database, stranded from before the 2026-08-10 phone-lookup fix.
+  Left untouched: they are historical evidence, they are not `PENDING` so
+  Android will not redial them, and deleting production rows was not in scope.
+- `answeredAt` has no producer yet. It is stored and displayed correctly when
+  sent (verified), but nothing sends it until the Android side can observe a
+  real off-hook moment.
+
+---
+
+## 2026-08-12 — Client navigation cache, intent-based prefetch, and the self-updating active call
+
+Second half of the improvement sprint begun on 2026-08-11. The 08-11 entry
+made each page *cost* less (fewer SQL statements per request); this pass makes
+navigation *avoid* the server where it safely can, and makes the one workflow
+where data arrives on its own — a live call — update the page without anyone
+touching the browser's refresh button.
+
+Nothing was redesigned, no working functionality was removed, no existing API
+changed, and `ConbunCall_V4` was **not modified** (CLAUDE.md §1/§3.9). The
+code below was written in an earlier session that ended before it could be
+verified or written up; this entry records the verification, which was run in
+full against the real Neon database, plus the documentation and cleanup that
+were still outstanding.
+
+**Files created:**
+- `lib/calls/pulse.ts` — pure functions (no database, no React) answering two
+  questions: has anything about this customer's calling changed (`version`),
+  and is anything still expected to arrive (`active`).
+- `app/api/customers/[id]/call-status/route.ts` — the CRM-only probe that
+  serves those two answers.
+- `components/crm/CallActivityRefresher.tsx` — customer-detail watcher.
+- `components/crm/CallQueueRefresher.tsx` — customers-list watcher.
+- `components/crm/HoverPrefetchLink.tsx` — prefetch on intent.
+
+**Files modified:**
+- `next.config.ts` — `experimental.staleTimes`.
+- `components/crm/CallRequestButton.tsx` — optimistic Call button.
+- `components/crm/CustomerForm.tsx` — cache invalidation on create.
+- `app/(app)/customers/[id]/page.tsx`, `components/crm/CustomersExplorer.tsx`
+  — mount the watchers, use the prefetching link.
+- `components/crm/CallActivityRefresher.tsx` + the detail page's use of it —
+  first-poll baseline changed from `lifecycle` to `version` (bug fix, see
+  decision 10).
+- `API_DOCUMENTATION.md`, `ANDROID_API_INTEGRATION.md` — document the new
+  route and state plainly that Android must not call it.
+
+**Files deleted:**
+- None.
+
+**Decisions made:**
+
+1. **The browser cache is Next.js's own Client Cache, switched on — not a new
+   library.** Both CRM pages are `force-dynamic`, and since Next.js 15 the
+   client-cache TTL for dynamic pages defaults to **0 seconds**, i.e. off. So
+   every "back to the list", every "open the customer I was just looking at",
+   was a full server render and a fresh set of round trips no matter how cheap
+   the queries had been made — precisely the navigation loop the sprint is
+   about. `staleTimes: { dynamic: 30, static: 180 }` fixes that with a config
+   key rather than a dependency (CLAUDE.md rule #6). Confirmed valid in the
+   installed Next.js 16.3.0, not a stale option: `node_modules/next/dist/
+   server/config-shared.d.ts` still lists `staleTimes` under `experimental`,
+   and Next's bundled docs confirm the `dynamic` default of 0.
+
+2. **30 seconds, not longer, and every mutation clears it.** 30s is the
+   ceiling on how stale anything can look while nothing is happening; while a
+   call *is* in flight staleness is handled by the watcher below rather than
+   by a timer. All five client mutation paths call `router.refresh()`, which
+   drops the cached payloads immediately: `CustomerForm` (create),
+   `CallRequestButton` (call), `AgentsTable` (×2), `FollowUpList` (×2). The
+   create path needed the addition — an agent who had just been on
+   `/customers` would otherwise land back on a cached list predating the
+   customer they had only just created, the one case where "instant" would be
+   plainly wrong.
+
+3. **Prefetch on intent, never on viewport.** Next.js only prefetches a
+   dynamic route down to its `loading.tsx` boundary, so a plain `<Link>`
+   prefetched the skeleton and clicking still waited on the server;
+   `prefetch={true}` prefetches dynamic routes in full. But `<Link>` prefetches
+   on entering the viewport, so `prefetch={true}` on a 25-row list would render
+   25 full customer detail pages server-side — call history, stats and all — to
+   serve one click. That is exactly the "prefetch huge call histories for every
+   customer" the sprint forbids. `HoverPrefetchLink` arms on hover/focus/touch
+   instead, so the database only does the work for a customer the agent has
+   actually pointed at. Intent is sticky, so sweeping the cursor back over a
+   row doesn't re-request it. **Prefetching is production-only in Next.js** —
+   this does nothing under `next dev`, by the framework's design.
+
+4. **The active-call watcher polls a fingerprint, not the page.** A poll that
+   finds nothing new costs ~80 bytes and repaints nothing; the expensive part
+   (`router.refresh()`, which re-runs the page's four queries) happens only
+   when the fingerprint actually changed. The alternative — refreshing the page
+   on a timer — would have re-rendered the whole customer detail page every few
+   seconds whether or not anything moved.
+
+5. **The server decides when polling stops, and the honest stop condition is
+   a deadline.** `active: false` ends the loop and the client obeys it. A
+   quiet customer returns `active: false`, so an idle CRM makes **zero**
+   requests — the common case. A call that connected is watched only while a
+   recording, transcript or summary could still land, and for at most 15
+   minutes after it last changed: a call that simply never produced a recording
+   (most calls — audio never leaves the phone unless Android finds and reports
+   a file) is indistinguishable from one whose recording is still coming, so a
+   deadline is the only truthful way to stop. Past it the data still appears on
+   the next navigation; only the automatic watching ends.
+
+6. **An unanswered call is not watched at all.** A `MISSED`/`REJECTED`/
+   `FAILED` call has no conversation to record, transcribe or summarize, so
+   waiting a quarter of an hour on its pipeline would mean polling on every
+   unanswered call — a great many of them — for something that can never
+   arrive. Verified: a missed call returns `active: false` immediately.
+
+7. **The Call button is optimistic, and says so honestly.** It now shows
+   "Queued" on the click itself rather than after the round trip (~324 ms
+   measured). Creating a request is a single `INSERT` that either works or
+   404s, and the agent is waiting on the *request* being queued, never on the
+   phone call. On failure the button says "Retry call"; it never claims the
+   call connected.
+
+8. **The list watcher refreshes directly; the detail watcher does not.** A
+   list-wide fingerprint would need its own batch endpoint, and the window the
+   list actually waits on is the handful of seconds between clicking Call and
+   Android's 4-second poller picking the request up. Refreshing outright is the
+   simpler reliable thing there — which is why its cadence is slower (6s→24s
+   versus 3s→20s) and its ceiling is 5 minutes.
+
+9. **Deliberately did NOT add websockets, SSE, or a polling library.** The
+   only thing that changes on its own is one customer's call, watched by one
+   tab, for minutes at a time. Both watchers back off, pause in a hidden tab,
+   check immediately on return, and stop; that covers the requirement without
+   a persistent connection per open tab or a dependency (CLAUDE.md rule #6,
+   and §24's "choose the safer incremental solution").
+
+10. **Bug fixed in the watcher's first poll — a real hole in exactly the
+    behaviour this pass exists to provide.** The refresher compared its first
+    poll against the *lifecycle* the page rendered with, on the reasoning that
+    it should catch a call that finished between render and mount. But a
+    recording, transcript or summary landing in that same window does **not**
+    change the lifecycle — `CONNECTED` stays `CONNECTED` — so the comparison
+    saw no change; and because the fingerprint then stayed constant from that
+    point on, no later poll could detect it either. The stage would have stayed
+    invisible until the agent navigated away and back: precisely the manual
+    refresh the sprint is meant to remove, in the narrow-but-real window when
+    stages are actually arriving. The page now passes its own
+    `callActivityPulse(...).version` and the first poll compares against that.
+
+    Safe to compare because both sides compute the fingerprint over identical
+    row sets — the page reads 25 calls (`CALL_HISTORY_PAGE_SIZE`) and 5
+    requests (`listCallRequestsForCustomer`'s default), and the endpoint's
+    `UNION ALL` uses the same two limits. Had they differed, every page load
+    with an active call would have fired one spurious refresh; verified
+    they don't, then verified live that a transcript arriving moves the version
+    while the lifecycle stays `CONNECTED`.
+
+**Tests/builds performed** — all actually run this pass, not reviewed:
+- `npx tsc --noEmit`, `npm run lint`, `npm run build` — all clean.
+- `npx prisma migrate status` — 6 migrations, "Database schema is up to
+  date". (The first attempt returned `P1001`; the Neon compute was asleep and
+  answered on the retry. DNS and TCP:5432 were confirmed reachable first.)
+- **End-to-end HTTP suite against `npm run start` and the real Neon database:
+  69 checks, 69 passed, 0 failed.** It walks the Android flow in order —
+  create customer → lookup (4 number formats) → Call button → concurrent-press
+  burst → Android poll → accept → `POST /api/calls` → call result → recording →
+  transcript → summary → pages — asserting the pulse at every stage.
+- Latency measured over 8 runs per route after warm-up.
+- **Re-run after the decision-10 fix: rebuilt, restarted, 13 further checks,
+  13 passed, 0 failed** — the same lifecycle walk plus an explicit assertion
+  of the case the fix addresses (a transcript arriving must move `version`
+  while `lifecycle` stays `CONNECTED`), and that the page then renders the
+  transcript and summary.
+
+**Actual results:**
+
+The pulse, which is the new thing and therefore the thing that had to be
+proven:
+
+| stage | `lifecycle` | `active` |
+|---|---|---|
+| customer with no calls | `NONE` | **false** (idle CRM polls nothing) |
+| Call clicked | `QUEUED` | true |
+| Android accepted | `DIALING` | true |
+| `POST /api/calls` | `IN_PROGRESS` | true |
+| result `ANSWERED` | `CONNECTED` | true (stages may still arrive) |
+| recording + transcript + summary all done | `CONNECTED` | **false** (stops) |
+| result `MISSED` | `NOT_ANSWERED` | **false** (stops immediately) |
+
+`version` changed at every real transition and was **stable across repeated
+polls when nothing changed** — the property that stops a refresh loop.
+
+Latency, medians over 8 runs from this dev machine (far from the Neon region;
+per-statement latency here is 265–400 ms, so these are round-trip counts more
+than they are wall-clock verdicts):
+
+| route | median | min | max |
+|---|---|---|---|
+| `/api/health` (framework floor) | 13 ms | 9 | 170 |
+| `/api/customers/{id}/call-status` | **384 ms** | 264 | 2009 |
+| `/api/call-requests?status=PENDING` | 366 ms | 269 | 414 |
+| `/api/customers/{id}/calls` | 613 ms | 518 | 830 |
+| `/customers` (page) | 1040 ms | 1002 | 3907 |
+| `/customers/{id}` (page) | 1622 ms | 1426 | 1695 |
+
+The probe costs one round trip, as designed. First-hit outliers (2009 ms,
+3907 ms) are cold route compilation plus connection warm-up, not steady state.
+
+Data integrity, verified live: 5 simultaneous Call presses → exactly one
+`PENDING` request id (repeats return `200`, not a duplicate `201`); repeat
+transcript, summary and recording deliveries each returned the same row id
+rather than creating a second row; `keyPoints` round-tripped through
+`$queryRaw` with embedded commas and quotes intact; a `FAILED` summary left
+the call, its 137 s duration, the recording and the transcript untouched, and
+a later successful submission cleared the `FAILED`; a 0-second `MISSED` call
+stored 0 s and rendered as "Not answered", never as an answered call.
+
+**Database left as found — and cleaner.** The verification runs created three
+clearly-marked `ZZ VERIFY … (auto-delete)` customers and deleted them all. They
+also removed four `ZZ TEST … (delete me)` customers (with their 4 calls, 4
+transcripts, 4 recordings, 3 summaries and 4 requests) that the interrupted
+session had left stranded in the live database. Census after: **35 customers,
+3 agents, 4 calls, 34 call requests, 1 transcript, 0 recordings, 0 summaries,
+0 actions, 0 pending requests.** Every real customer was left untouched —
+including the three added since the 08-11 entry (Kewalya, Saurabh,
+dharmendra) and the seeded `(Test) …` development block, which is deliberately
+kept.
+
+**Incomplete / still requiring verification:**
+
+- **No real-device test was performed this pass**, again. The contract was
+  exercised over HTTP with exactly the payloads `ConbunCall_V4` sends, which
+  is not the same as a phone placing a real call. The auto-refresh in
+  particular has been proven at the API level (the pulse transitions above)
+  but not yet watched on a screen while a real call runs.
+- **The browser cache was verified by configuration and framework
+  documentation, not by driving a browser.** `staleTimes` is confirmed a valid
+  Next.js 16.3.0 option and the invalidation calls are all in place, but no
+  automated test measures a real back-navigation being served from the client
+  cache. That needs a browser session, and is the most valuable thing to check
+  on the deployed CRM.
+- **Hover prefetch does nothing in `next dev`** — prefetching is production-
+  only in Next.js. Judge it on Vercel, not locally.
+- The duplicate-request race is still narrowed rather than eliminated (see
+  the 08-11 entry, decision 4) — unchanged this pass.
+- `GET /customers/<unknown-id>` still returns HTTP `200` with the correct
+  "Customer not found" page. Pre-existing, framework streaming behaviour,
+  deliberately not chased.
+- 14 `ACCEPTED` call requests with no linked call remain in the production
+  database from before the 08-10 phone-lookup fix. Still deliberately
+  untouched: they are historical evidence and are not `PENDING`, so Android
+  will not redial them.
+- `answeredAt` still has no producer; it is stored and displayed when sent.
+
+---
+
+## 2026-08-12 — Call History: "View" for stored transcript/summary, and "Not available" instead of "Failed"
+
+**Files created:**
+- None.
+
+**Files modified:**
+- `components/crm/CallHistoryTable.tsx` — Transcript and Summary columns now
+  offer a **View** button when content is actually stored; the badge is kept
+  only for the cases where there is nothing to open. Replaced `pipelineBadge()`
+  with `contentBadge()` for these two columns.
+- `components/crm/CallHistoryTable.module.css` — added `.viewButton` and
+  `.panelFocused`.
+
+**Files deleted:**
+- None.
+
+**Decisions made:**
+- **Scope was display only.** No API, schema, migration, call-lifecycle,
+  recording/transcription/summary-processing or Android change. Nothing is
+  fetched or generated by a View click: the transcript and summary strings are
+  already on the `Call` objects the page hands this component (one joined
+  query, `CALL_COLUMNS` in `lib/calls/service.ts`), so View is pure local
+  state.
+- **The existing expandable detail row is the viewer**, per the "same Call
+  Detail experience" requirement — no modal, no second page, no new route.
+  View opens that row and scrolls to the Transcript or AI summary panel, which
+  gets a temporary outline so the eye lands in the right place in a row that
+  has six panels. The chevron still toggles the row exactly as before.
+- **"Failed" no longer appears for a transcript or summary that has no
+  content** — it now reads "Not available". The old behaviour showed the
+  pipeline's `FAILED` status in the column, which reads as "something broke,
+  go chase it" for what is usually just a call with nothing to show (a missed
+  call, most often). `PENDING`/`PROCESSING` still say "Waiting"/"Working",
+  because there genuinely is something to wait for. The two panels' empty-state
+  prose was reworded to match.
+- **Recording deliberately untouched**, including its "Failed" badge — out of
+  scope for this pass by explicit instruction.
+- No new dependency (CLAUDE.md rule #6). Notably, no headless browser or test
+  runner was added just to click a button — see the verification gap below.
+
+**Tests/builds performed:**
+- Read-only DB inspection of the 8 most recent calls (throwaway script, deleted
+  after; reported lengths and presence only, never content).
+- `npx tsc --noEmit` — clean.
+- `npm run lint` — clean.
+- `npm run build` — succeeded, all 23 routes.
+- `npm run start` + `curl` of the real customer detail page for the call at
+  **2026-08-12 04:04:44 IST** (`2f0e3555`, customer `eef0e5a1`), plus
+  `GET /api/customers/{id}/calls`.
+
+**Actual results:**
+- Both are genuinely stored for that call: transcript `DONE`, 2679 chars;
+  summary `DONE`, 348 chars + 4 key points, `generated_at` 22:44:20Z.
+- The CRM was already reading both and already handing both to the UI —
+  `/api/customers/{id}/calls` returns 2679/348 chars, and the server-rendered
+  page delivers the full transcript to the browser (React Flight sends it as a
+  referenced text row, `$1e9` → a 6127-byte Text row; the short `$`-prefixed
+  value in the payload is the reference token, not a truncated transcript).
+  So this was a **discoverability** fix, not a broken data path.
+- The rendered page now shows 4 View buttons (2 calls × transcript+summary),
+  2 "Not available" badges on the 03:38 IST missed call (`455b6a49`, whose
+  transcript and summary rows are both `FAILED` with no text) — where it
+  previously showed "Failed" — and 1 remaining "Failed", which is that call's
+  recording badge, intentionally left alone.
+
+**Incomplete / still requiring verification:**
+- **The click itself was not exercised in a real browser.** The project has no
+  test runner and no headless browser, and adding one for this was out of
+  scope. Verified: the buttons render, with the right count, on the right rows,
+  and the content they open is present in the client payload. Not verified by
+  execution: that clicking View expands the row and smooth-scrolls to the
+  panel. Worth one manual click on `/customers/eef0e5a1-c67e-4ab0-863d-1491643cd208`.
+- Unchanged and still true from 2026-08-10: `answeredAt` has no producer, and
+  the 14 stale `ACCEPTED` call requests remain untouched.

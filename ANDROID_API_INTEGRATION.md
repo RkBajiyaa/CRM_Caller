@@ -14,6 +14,69 @@
 > `BackendApiService` don't have call-request methods yet" — they do, and
 > `CallRequestPoller` drives them.
 
+## What changed on the CRM side on 2026-08-11 (read this first)
+
+**Nothing Conbun Call sends today needs to change.** Every endpoint keeps its
+URL, its method, its existing request fields and its existing response fields.
+`FinishCallRequest(status, endedAt, durationSeconds)`,
+`StartCallRequest(...)`, `SubmitTranscriptRequest(text, language)`,
+`RegisterRecordingRequest(...)`, `UpdateCallRequestStatusRequest(status,
+callId)` and the `?status=PENDING` poll all work unchanged — verified against
+a real server, with the legacy `FinishCallRequest` shape tested explicitly.
+
+Four things are worth knowing on the Android side:
+
+1. **`PATCH /api/calls/{id}` now accepts two optional extras**, `answeredAt`
+   (ISO-8601) and `failureReason` (free text, ≤500 chars). Both default to
+   `null` and are never inferred — the CRM will not derive an answer time from
+   the duration. `CallSessionTracker.describeUnsuccessfulOutcome` already
+   computes exactly the string `failureReason` wants for its on-device
+   activity log; sending it costs one field. `answeredAt` genuinely isn't
+   available from the OS `CallLog`, so omitting it stays correct — send it
+   only if a future telephony-state path can observe the actual off-hook
+   moment.
+
+2. **Call responses carry more fields.** `answeredAt`, `failureReason`,
+   `recordingStorageKey`/`recordingMimeType`/`recordingSizeBytes`, the
+   `aiSummary*` content fields, and `callRequestRequestedAt` were added to the
+   call shape. Gson ignores unknown fields, so `CallDto` needs no change; add
+   them only if something on the phone wants to read them back.
+
+3. **`POST /api/call-requests` is now near-atomic** against concurrent
+   presses (five simultaneous presses produce one `PENDING` row). Android
+   never `POST`s here, so this changes nothing for the app — but it does mean
+   the poller should see materially fewer duplicate requests for the same
+   customer than the current production data shows.
+
+4. **`GET /api/customers/{id}/calls` is now bounded** (`?limit=`, default 25,
+   max 200) and returns a `truncated` flag; `stats` still covers every call.
+   No Android call site uses this endpoint (verified by grep of
+   `BackendApiService.kt`), so it is informational.
+
+**Added 2026-08-12 — and explicitly not for Android:** the CRM now has one new
+route, `GET /api/customers/{id}/call-status`. It is a fingerprint the CRM's own
+browser tab polls so an agent watching a call in progress doesn't have to hit
+refresh; it returns `{version, lifecycle, active}` and no call data. **Android
+must not call it and needs no change for it.** It reads the same `calls` and
+`call_requests` rows Android already writes, invents no status, stores nothing,
+and does not alter any endpoint Android uses. The one thing worth knowing on the
+phone side is that the CRM now surfaces each stage *as it arrives* — so a
+recording registered minutes after the call, or a transcript that lands later,
+shows up on the agent's screen on its own rather than at the next page load.
+
+Nothing about phone-number matching changed. The rule is still: exact match on
+the stored `phoneNumber` first, then the **last 10 digits with non-digits
+stripped** — the same rule `PhoneNumberUtils.looseMatch`/`crmLookupDigits`
+already use. Re-verified this pass against a live server for
+`"+91 99999 00042"`, `"+919999900042"`, `"9999900042"` and `"09999900042"`,
+all resolving to one customer.
+
+Summary *content* now has a written contract:
+[`SUMMARY_CONTRACT.md`](SUMMARY_CONTRACT.md) — grounding rules, section
+structure, and the English-only output rule for Hindi/English calls. It binds
+whoever generates summaries (today, Conbun Call's own OpenAI provider), not
+the CRM, which stores and displays without validating.
+
 ## Current contract (verified 2026-08-10)
 
 Verified by reading `ConbunCall_V4`'s source (read-only — no Android file

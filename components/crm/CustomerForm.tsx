@@ -95,6 +95,13 @@ export function CustomerForm({ agents }: { agents: Agent[] }) {
       return;
     }
 
+    // Drop the cached navigation payloads before leaving (see next.config.ts:
+    // pages are reusable for 30s after a visit). Without this, an agent who
+    // had just been on /customers would land back on a cached list that
+    // predates the customer they only just created -- the one case where
+    // "instant" would be plainly wrong. A mutation invalidates the cache
+    // immediately; nobody has to refresh the browser.
+    router.refresh();
     router.push(`/customers/${result.data.id}`);
   }
 

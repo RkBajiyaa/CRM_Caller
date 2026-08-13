@@ -34,5 +34,12 @@ export async function POST(request: NextRequest) {
   }
 
   const call = await startCall(parsed.data);
+  if (!call) {
+    // Only reachable if the customer disappeared between the check above and
+    // the insert, or if `agentId` points at an agent that doesn't exist --
+    // a bad reference from the caller either way, which used to surface as a
+    // 500. Same status and same message as the check above.
+    return NextResponse.json({ error: "customerId does not match an existing customer." }, { status: 404 });
+  }
   return NextResponse.json({ data: call }, { status: 201 });
 }

@@ -130,7 +130,7 @@ If two customers collide on the last 10 digits, the oldest CRM entry wins,
 deterministically — but `POST /api/customers` now rejects creating such a
 collision in the first place.
 
-### `GET /api/customers/{id}/calls`
+### `GET /api/customers/{id}/calls?limit=`
 
 Call history + aggregate stats for one customer, returned together (the UI
 always needs both):
@@ -139,15 +139,22 @@ always needs both):
 {
   "data": [ { "id": "...", "customerId": "...", "agentId": "...", "agentName": "...",
               "phoneNumber": "...", "direction": "OUTGOING", "status": "ANSWERED",
-              "startedAt": "...", "endedAt": "...", "durationSeconds": 142,
+              "startedAt": "...", "answeredAt": null, "endedAt": "...", "durationSeconds": 142,
+              "failureReason": null,
               "hasRecording": true, "recordingDurationSeconds": 145, "recordingStatus": "PENDING",
+              "recordingStorageKey": null, "recordingMimeType": null, "recordingSizeBytes": null,
               "transcriptStatus": "DONE", "transcriptText": "...", "transcriptLanguage": null,
-              "aiSummaryStatus": "DONE",
+              "aiSummaryStatus": "DONE", "aiSummaryText": "...", "aiSummaryKeyPoints": ["..."],
+              "aiSummaryCustomerIntent": null, "aiSummarySentiment": null,
+              "aiSummaryRecommendedAction": null, "aiSummaryFollowUpRequired": false,
+              "aiSummaryGeneratedAt": null,
               "callRequestId": "...", "callRequestStatus": "COMPLETED",
+              "callRequestRequestedAt": "...",
               "createdAt": "...", "updatedAt": "..." } ],
   "stats": { "totalCalls": 1, "answeredCalls": 1, "missedCalls": 0, "incomingCalls": 0,
              "outgoingCalls": 1, "totalConversationSeconds": 142,
-             "lastContactedAt": "...", "lastContactedByAgent": "..." }
+             "lastContactedAt": "...", "lastContactedByAgent": "..." },
+  "truncated": false
 }
 ```
 
@@ -157,6 +164,72 @@ always needs both):
 that ignores unknown fields is unaffected). They exist so the CRM can show
 the transcript itself rather than only whether one exists, and so a call can
 be traced back to the CRM request that started it.
+
+**Added 2026-08-11, also additive only:** `answeredAt`, `failureReason`,
+`recordingStorageKey`/`recordingMimeType`/`recordingSizeBytes`, the
+`aiSummary*` content fields, `callRequestRequestedAt`, the `limit` query
+parameter, and the `truncated` response flag. Nothing was renamed or removed.
+
+Two behaviours worth knowing:
+
+- **`limit` bounds `data`, never `stats`.** Default `25`, max `200`. The
+  aggregates are computed in Postgres across *every* call the customer has,
+  so a bounded page and a full history report the same numbers; `truncated`
+  says whether `data` is a subset. Before this the route returned every call
+  a customer had ever had, transcript text included, on every request.
+- The whole response is now **one** SQL statement plus the customer lookup
+  (it was seven). Prisma issues an extra statement per `include`d relation
+  and this project's Neon adapter serializes them — see
+  `lib/calls/service.ts` for the measurement and the rewrite.
+
+### `GET /api/customers/{id}/call-status`
+
+**CRM-only, added 2026-08-12. Android neither calls this nor needs to know
+it exists** — it is additive and changes nothing about the existing contract.
+
+The liveness probe behind the customer detail page's auto-refresh
+(`components/crm/CallActivityRefresher.tsx`), which is what removes the manual
+browser refresh from the active-call workflow. It returns a *fingerprint*, not
+the call data:
+
+```json
+{ "data": { "version": "1a2b3c", "lifecycle": "IN_PROGRESS", "active": true } }
+```
+
+- **`version`** changes when anything the detail page displays about this
+  customer's calls changes — call outcome, recording, transcript, summary, or
+  request status. The browser re-renders the page (one `router.refresh()`)
+  only when this differs from the value it last saw, so a poll that finds
+  nothing new transfers ~80 bytes and repaints nothing. It is stable across
+  repeated polls when nothing has changed (verified), which is what stops a
+  refresh loop.
+- **`lifecycle`** is the existing derived vocabulary from
+  `lib/call-requests/lifecycle.ts` (`NONE`/`QUEUED`/`DIALING`/`IN_PROGRESS`/
+  `CONNECTED`/`NOT_ANSWERED`/`FAILED`/`CANCELLED`/`UNKNOWN`). **No new status
+  is invented or stored** — it is computed from the `CallRequest` and `Call`
+  rows that already exist.
+- **`active`** is the CRM's own "keep watching?" answer, and the client obeys
+  it. `false` means stop polling. This is what makes the watching terminate
+  instead of running forever:
+  - a customer with nothing in flight returns `active: false`, so an idle CRM
+    makes **zero** polling requests;
+  - a call that connected stays `active` only while its recording, transcript
+    or summary could still legitimately arrive, and for at most 15 minutes
+    after that call last changed;
+  - a `MISSED`/`REJECTED`/`FAILED` call returns `active: false` immediately —
+    an unanswered call has no conversation to record, transcribe or
+    summarize, so there is nothing to wait for.
+
+Never a `404`: an unknown customer id simply has no calls and no requests, so
+the honest answer is "nothing is happening, stop polling" — which is exactly
+what a client whose customer was deleted mid-watch should be told.
+
+**One** SQL statement, deliberately (a `UNION ALL` over the calls and the
+requests rather than the obvious two queries — this project's Neon adapter
+serializes statements, so a second query would double the latency of a path
+that repeats). It selects booleans rather than transcript/summary text, so a
+poll's cost stays flat however long the transcript is. Measured against the
+live database from a dev machine: **median 384 ms**, i.e. a single round trip.
 
 ## Call requests — CRM "Call" button → Android pending-request queue
 
@@ -233,6 +306,30 @@ or one click per page load, since the button's state didn't survive a
 refresh — meant the same customer got dialed twice. The live database still
 contains several such duplicates from before this change.
 
+**Hardened 2026-08-11 — concurrent presses.** The de-duplication above was a
+`SELECT` followed by an `INSERT`, with a full network round trip (~350 ms
+against Neon) between them: two presses landing inside that window both saw
+"nothing queued" and both inserted. The check is now part of the `INSERT`
+itself (`INSERT ... SELECT ... WHERE NOT EXISTS`), shrinking the window from a
+round trip to the statement. Verified against the live database: five
+simultaneous `POST`s for one customer produce exactly one `PENDING` row, and
+three concurrent service-level calls return one and the same request id.
+
+This is not an absolute guarantee — under `READ COMMITTED` two statements can
+still both pass `NOT EXISTS` before either commits — but it needs
+sub-millisecond timing rather than being routinely hit. A partial unique index
+(`UNIQUE (customer_id) WHERE status = 'PENDING'`) would close it completely;
+it was deliberately **not** added, because Prisma cannot express one in
+`schema.prisma`, so the schema and the database would permanently disagree
+about an index Prisma can't see — a bad trade in a project whose `CLAUDE.md`
+tells every session to run `prisma migrate dev`.
+
+The same rewrite made the new-request path **one** SQL statement instead of
+three (customer lookup, pending check, insert), since the customer row is
+joined into the `INSERT`. The "already queued" and "no such customer" paths
+pay a second statement to tell those two cases apart — the right way round,
+since only one of the three is the path an agent waits on.
+
 ### `GET /api/call-requests?status=PENDING&limit=`
 
 This is Android's polling endpoint. `status` optional — one of
@@ -295,21 +392,56 @@ unknown `callRequestId` doesn't fail call creation, it's just not
 linked). Omit it entirely for calls that didn't originate from a request
 — nothing else about this endpoint changes.
 
-### `PATCH /api/calls/{id}` — finish a call
+### `PATCH /api/calls/{id}` — the call result
 
 ```json
+// What ConbunCall_V4 sends today. Unchanged, still correct, still complete.
 { "status": "ANSWERED", "endedAt": "2026-08-08T16:00:00Z", "durationSeconds": 142 }
+```
+
+```json
+// Everything this endpoint will accept. Every field is optional.
+{
+  "status": "REJECTED",
+  "answeredAt": "2026-08-08T15:57:38Z",
+  "endedAt": "2026-08-08T16:00:00Z",
+  "durationSeconds": 142,
+  "failureReason": "Call rejected by the other side",
+  "agentId": null
+}
 ```
 
 `status` is one of `ANSWERED`/`MISSED`/`REJECTED`/`FAILED`. Also accepts
 `agentId` to (re)assign the call. `404` if the call doesn't exist.
 
-This is the endpoint that carries the **call result**: connected/answered
-(`status`), duration (`durationSeconds`), and completion time (`endedAt`).
-There is no separate "call result" endpoint and none is needed — verified
-2026-08-10 that Android's `FinishCallRequest` already maps onto exactly
-these three fields, including its `Instant.toString()` timestamps in all
-three shapes Java can emit (`...Z`, `...123Z`, `...123456789Z`).
+This is the endpoint that carries the **call result**. There is no separate
+"call result" endpoint and none is needed — verified 2026-08-10 that
+Android's `FinishCallRequest` already maps onto `status`/`endedAt`/
+`durationSeconds`, including its `Instant.toString()` timestamps in all three
+shapes Java can emit (`...Z`, `...123Z`, `...123456789Z`).
+
+**`answeredAt` and `failureReason` are new (2026-08-11) and optional.** A
+client that sends neither behaves exactly as it does today, and both stay
+`null` — they are never inferred:
+
+- `answeredAt` — when the call was actually picked up. Not derivable from
+  anything already stored: `durationSeconds > 0` says a call connected, never
+  when, and `startedAt` is when dialling began. The CRM will not guess it from
+  the duration, so a client that cannot report it should simply omit it.
+  (ConbunCall_V4 derives its outcome from the OS `CallLog`, which has no
+  answer timestamp, so it omits it today — that is correct, not a gap.)
+- `failureReason` — free text (≤500 chars) behind a `MISSED`/`REJECTED`/
+  `FAILED` outcome, e.g. `"Call rejected by the other side"`. `status` stays
+  the closed vocabulary anything programmatic branches on; this is only ever
+  extra detail a person reads. ConbunCall_V4 already computes exactly this
+  string in `CallSessionTracker.describeUnsuccessfulOutcome` for its own
+  on-device activity log — sending it here needs no new logic on that side.
+
+**This endpoint does not wait for anything.** It writes what happened on the
+phone and returns — it does not look for a recording, does not transcribe, and
+does not summarize. Those arrive later through their own endpoints and cannot
+delay or fail the call result. As of 2026-08-11 it costs two SQL statements
+(the update, then one joined read to return the call); it used to cost six.
 
 A call whose `status` is still `null` is one that was started and never
 finished — a live call, or one whose finish never arrived. The CRM shows
@@ -370,12 +502,24 @@ transcribes anything itself.
 Submitting non-empty `text` with no explicit `processingStatus` implies
 `DONE`. Registers or updates.
 
-Once submitted, the text is **displayed** in the CRM: the customer's call
-history row for that call gains a collapsed "Transcript" disclosure holding
-the full text (`GET /api/customers/{id}/calls` now returns `transcriptText`/
-`transcriptLanguage` alongside the existing `transcriptStatus`). Nothing is
-shown until real text arrives — the badge says `Pending`, never a placeholder
-transcript.
+**Retry semantics (fixed 2026-08-11).** These rules are what make a failure at
+one stage survivable:
+
+- A submission carrying **no text** never overwrites text already stored. So
+  `{"processingStatus": "FAILED"}` records a failed attempt *without*
+  destroying a transcript that had already succeeded.
+- A submission carrying **real text and no explicit status** sets `DONE`, even
+  if the row was previously `FAILED`. Before this fix a transcript that failed
+  once and was then re-uploaded successfully kept `processingStatus: "FAILED"`
+  forever while holding the finished text — the status column and the text
+  column disagreed. The same fix applies to `POST /api/calls/{id}/summary`.
+
+Once submitted, the text is **displayed** in the CRM: opening the call's row
+in the customer's call history shows the full transcript alongside that call's
+timings, recording metadata, summary and follow-up (`GET
+/api/customers/{id}/calls` returns `transcriptText`/`transcriptLanguage`
+alongside the existing `transcriptStatus`). Nothing is shown until real text
+arrives — the badge says `Waiting`, never a placeholder transcript.
 
 ## AI summaries — structure only, nothing fabricated
 
@@ -397,6 +541,19 @@ submitted summary returns `{ "data": null, "processingStatus": "PENDING" }`
 
 Intended caller: whatever real AI pipeline eventually exists (e.g.
 Android's own `OpenAiSummaryProvider`), not this backend.
+
+Same retry semantics as transcripts (see above, fixed 2026-08-11): a
+`{"processingStatus": "FAILED"}` submission never erases a summary that had
+already succeeded, and a later submission carrying real `summaryText` clears
+the `FAILED` state instead of leaving the row permanently contradicting
+itself. **A summary failure can never damage the transcript, the recording, or
+the call** — they are separate rows and nothing on this endpoint touches them.
+
+**What a summary should contain** — structure, grounding, and the
+English-output rule — is specified in [`SUMMARY_CONTRACT.md`](SUMMARY_CONTRACT.md).
+The CRM stores and displays whatever it is given and validates none of it, so
+that contract is binding on the pipeline that *produces* summaries, not on
+this endpoint.
 
 ## Follow-ups / actions
 

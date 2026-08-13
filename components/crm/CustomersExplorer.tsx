@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import type { Customer, CustomerStatus } from "@/lib/customers/types";
 import { Avatar } from "@/components/crm/Avatar";
 import { StatusBadge } from "@/components/crm/StatusBadge";
 import { StateMessage } from "@/components/crm/StateMessage";
 import { CallRequestButton } from "@/components/crm/CallRequestButton";
+import { CallQueueRefresher } from "@/components/crm/CallQueueRefresher";
+import { HoverPrefetchLink } from "@/components/crm/HoverPrefetchLink";
 import { LinkButton } from "@/components/ui/Button";
 import { formatDate, formatDuration } from "@/lib/format";
 import { CUSTOMER_STATUSES } from "@/lib/customers/types";
@@ -100,8 +101,14 @@ export function CustomersExplorer({
     router.push(`${pathname}?${next.toString()}`);
   }
 
+  // Only while some row is genuinely mid-call. A quiet queue polls nothing --
+  // see components/crm/CallQueueRefresher.tsx.
+  const queueActive = rows.some((row) => isCallLifecycleActive(row.lifecycle));
+
   return (
     <div>
+      <CallQueueRefresher active={queueActive} />
+
       <div className={styles.headerRow}>
         <div>
           <h1 className={styles.title}>Customers</h1>
@@ -177,19 +184,31 @@ export function CustomersExplorer({
               <tbody>
                 {rows.map((row) => (
                   <tr key={row.id}>
+                    {/* Hover/focus arms a full prefetch of this customer's
+                        detail page, so pointing at a row before clicking it
+                        makes the click open immediately. Deliberately not a
+                        plain <Link>, which would prefetch only the loading
+                        skeleton for a dynamic route -- and deliberately not
+                        eager, which would render 25 customers' call histories
+                        on the server to serve one click. See
+                        components/crm/HoverPrefetchLink.tsx. */}
                     <td>
-                      <Link href={`/customers/${row.id}`} className={styles.customerCell} title={`Customer ID: ${row.id}`}>
+                      <HoverPrefetchLink
+                        href={`/customers/${row.id}`}
+                        className={styles.customerCell}
+                        title={`Customer ID: ${row.id}`}
+                      >
                         <Avatar name={row.name} size="sm" />
                         <span className={styles.customerText}>
                           <span className={styles.nameLink}>{row.name}</span>
                           <span className={styles.customerMeta}>{row.assignedAgent ?? "Unassigned"}</span>
                         </span>
-                      </Link>
+                      </HoverPrefetchLink>
                     </td>
                     <td>
-                      <Link href={`/customers/${row.id}`} className={styles.phoneLink}>
+                      <HoverPrefetchLink href={`/customers/${row.id}`} className={styles.phoneLink}>
                         {row.phoneNumber}
-                      </Link>
+                      </HoverPrefetchLink>
                     </td>
                     <td className={styles.muted} title={row.location ?? undefined}>
                       {row.location ?? "--"}
@@ -204,9 +223,9 @@ export function CustomersExplorer({
                     </td>
                     <td className={styles.actionsCell}>
                       <CallRequestButton customerId={row.id} lifecycle={row.lifecycle} />
-                      <Link href={`/customers/${row.id}`} className={styles.viewLink}>
+                      <HoverPrefetchLink href={`/customers/${row.id}`} className={styles.viewLink}>
                         View
-                      </Link>
+                      </HoverPrefetchLink>
                     </td>
                   </tr>
                 ))}

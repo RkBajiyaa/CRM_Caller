@@ -1,7 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { Prisma } from "@/lib/generated/prisma/client";
 import type { CallRequestModel } from "@/lib/generated/prisma/models";
 import { prisma } from "@/lib/db/prisma";
-import { getCustomerById } from "@/lib/customers/service";
 import type {
   CallRequest,
   CreateCallRequestInput,
@@ -22,6 +22,31 @@ function toDomain(row: CallRequestModel): CallRequest {
   };
 }
 
+/** Shape returned by the raw create/lookup statements below -- `status` is cast to text because this project's Neon adapter can't deserialize Postgres enums through `$queryRaw`. */
+interface CallRequestRow {
+  call_request_id: string;
+  customer_id: string;
+  phone_number: string;
+  customer_name: string;
+  status: string;
+  call_id: string | null;
+  requested_at: Date;
+  updated_at: Date;
+}
+
+function rawToDomain(row: CallRequestRow): CallRequest {
+  return {
+    id: row.call_request_id,
+    customerId: row.customer_id,
+    phoneNumber: row.phone_number,
+    customerName: row.customer_name,
+    status: row.status as CallRequestStatus,
+    callId: row.call_id,
+    requestedAt: row.requested_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
 /**
  * CRM "Call" button -> POST here. `phoneNumber`/`customerName` are
  * snapshotted from the customer record at request time (so Android has
@@ -29,41 +54,89 @@ function toDomain(row: CallRequestModel): CallRequest {
  * backend-set to PENDING (CLAUDE.md rule #5's spirit -- never
  * client-chosen). Returns null if `customerId` doesn't match a real
  * customer, so the route can 404 instead of creating an orphaned request.
+ *
+ * Idempotent while a request is still queued: if this customer already has a
+ * PENDING request Android hasn't picked up, that same request is handed back
+ * rather than a second one being stacked behind it. Android treats every
+ * PENDING row as a separate call to place (its poller de-duplicates by request
+ * id, not by customer), so a double-click used to mean the customer got dialed
+ * twice -- the live database still holds duplicates from before that check
+ * existed.
+ *
+ * Deliberately only PENDING: an ACCEPTED request that never progressed (the
+ * Android app killed mid-dial, say) must not block an agent from trying again,
+ * which is exactly the case where re-calling matters most.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this is one statement rather than lookup -> check -> insert
+ * ---------------------------------------------------------------------------
+ * Two reasons, and both matter:
+ *
+ * 1. Correctness. The old version read "is there a PENDING request?" and then
+ *    inserted, with a full network round trip (~350 ms against Neon from
+ *    outside Vercel) in between. Two clicks landing inside that window both saw
+ *    "no", and both inserted. Folding the check into the INSERT's own
+ *    `WHERE NOT EXISTS` shrinks that window from a round trip to the statement
+ *    itself. It is not a uniqueness *guarantee* -- two concurrent statements
+ *    can still both pass `NOT EXISTS` under READ COMMITTED before either
+ *    commits -- but it turns a wide, routinely-hit race into one that needs
+ *    sub-millisecond timing. A partial unique index would close it completely;
+ *    Prisma cannot express one in schema.prisma, and hand-writing it into a
+ *    migration would leave the schema and the database permanently disagreeing
+ *    about an index Prisma can't see, which is a worse trade for a project
+ *    whose CLAUDE.md tells every session to run `prisma migrate dev`.
+ *
+ * 2. Latency, on the one path an agent actually waits for. Selecting the
+ *    customer, checking for a PENDING row and inserting was three serialized
+ *    round trips behind the Call button. Joining `customers` into the INSERT
+ *    makes the happy path a single one; the "already queued" and "no such
+ *    customer" paths pay a second statement to tell those two cases apart,
+ *    which is the right way round.
  */
 export async function createCallRequest(
   input: CreateCallRequestInput
 ): Promise<{ callRequest: CallRequest; created: boolean } | null> {
-  const customer = await getCustomerById(input.customerId);
-  if (!customer) return null;
+  const id = randomUUID();
+  const now = new Date();
 
-  // If a request for this customer is still sitting in the queue unclaimed,
-  // hand that one back instead of stacking another onto it. Android treats
-  // every PENDING row as a separate call to place (its poller de-duplicates
-  // by request id, not by customer), so a double-click -- or one click per
-  // page load, since the button's "Requested" state doesn't survive a
-  // refresh -- used to mean the same customer got dialed twice. The live
-  // database still shows several such duplicates.
-  //
-  // Deliberately only PENDING: an ACCEPTED request that never progressed
-  // (e.g. the Android app was killed mid-dial) must not block the agent from
-  // trying again, which is exactly the case where re-calling matters most.
-  const existingPending = await prisma.callRequest.findFirst({
-    where: { customerId: customer.id, status: "PENDING" },
-    orderBy: { requestedAt: "asc" },
-  });
-  if (existingPending) {
-    return { callRequest: toDomain(existingPending), created: false };
+  const inserted = await prisma.$queryRaw<CallRequestRow[]>`
+    INSERT INTO "call_requests" (
+      "call_request_id", "customer_id", "phone_number", "customer_name",
+      "status", "requested_at", "updated_at"
+    )
+    SELECT ${id}, c."customer_id", c."phone_number", c."name",
+           'PENDING'::"CallRequestStatus", ${now}, ${now}
+    FROM "customers" c
+    WHERE c."customer_id" = ${input.customerId}
+      AND NOT EXISTS (
+        SELECT 1 FROM "call_requests" r
+        WHERE r."customer_id" = c."customer_id" AND r."status" = 'PENDING'
+      )
+    RETURNING
+      "call_request_id", "customer_id", "phone_number", "customer_name",
+      "status"::text AS status, "call_id", "requested_at", "updated_at"
+  `;
+
+  if (inserted.length > 0) {
+    return { callRequest: rawToDomain(inserted[0]), created: true };
   }
 
-  const row = await prisma.callRequest.create({
-    data: {
-      customerId: customer.id,
-      phoneNumber: customer.phoneNumber,
-      customerName: customer.name,
-      status: "PENDING",
-    },
-  });
-  return { callRequest: toDomain(row), created: true };
+  // Nothing was inserted, which means one of exactly two things: this customer
+  // already has a queued request, or there is no such customer. One statement
+  // tells them apart -- an empty result is the 404.
+  const existing = await prisma.$queryRaw<CallRequestRow[]>`
+    SELECT
+      "call_request_id", "customer_id", "phone_number", "customer_name",
+      "status"::text AS status, "call_id", "requested_at", "updated_at"
+    FROM "call_requests"
+    WHERE "customer_id" = ${input.customerId} AND "status" = 'PENDING'
+    ORDER BY "requested_at" ASC
+    LIMIT 1
+  `;
+  if (existing.length > 0) {
+    return { callRequest: rawToDomain(existing[0]), created: false };
+  }
+  return null;
 }
 
 export const CALL_REQUESTS_DEFAULT_LIMIT = 200;
@@ -98,34 +171,10 @@ export async function getCallRequestById(id: string): Promise<CallRequest | null
   return row ? toDomain(row) : null;
 }
 
-/** Requests still waiting on Android -- created but not yet turned into a call, failed, or cancelled. */
-const OPEN_STATUSES: CallRequestStatus[] = ["PENDING", "ACCEPTED"];
-
-/**
- * The newest still-open request per customer, for a whole page of customers
- * in one query -- what lets the customers list show "Queued"/"Dialing" on the
- * Call button without a query per row.
- *
- * Only PENDING/ACCEPTED are fetched on purpose: once a request reaches any
- * other status the `Call` row is the thing worth showing, and it's already on
- * the row (see lib/calls/service.ts's getCallSummariesForCustomers).
- */
-export async function getOpenCallRequestsForCustomers(
-  customerIds: string[]
-): Promise<Map<string, CallRequest>> {
-  const byCustomer = new Map<string, CallRequest>();
-  if (customerIds.length === 0) return byCustomer;
-
-  const rows = await prisma.callRequest.findMany({
-    where: { customerId: { in: customerIds }, status: { in: OPEN_STATUSES } },
-    orderBy: { requestedAt: "desc" },
-  });
-  // Newest first, so the first one seen per customer is the one to show.
-  for (const row of rows) {
-    if (!byCustomer.has(row.customerId)) byCustomer.set(row.customerId, toDomain(row));
-  }
-  return byCustomer;
-}
+// The customers list's "newest still-open request per customer" lookup used to
+// live here as its own query. It is now one of two LATERALs inside
+// lib/calls/service.ts's getCustomerCallOverviews -- same data, same page of
+// customers, one fewer serialized round trip per list render.
 
 /** Most recent call requests for one customer, newest first -- the Customer Detail page's request history. */
 export async function listCallRequestsForCustomer(customerId: string, limit = 5): Promise<CallRequest[]> {

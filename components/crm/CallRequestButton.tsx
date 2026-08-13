@@ -32,39 +32,52 @@ export function CallRequestButton({
   size?: "sm" | "md";
 }) {
   const router = useRouter();
-  const [state, setState] = useState<"idle" | "loading" | "requested" | "error">("idle");
+  const [state, setState] = useState<"idle" | "requested" | "error">("idle");
 
   async function handleClick() {
-    setState("loading");
+    // Optimistic, and deliberately so: say "Queued" on the click itself
+    // rather than after the round trip. Creating the request is a single
+    // INSERT that either works or 404s, and the agent is waiting on the
+    // *request* being queued -- never on the phone call, which happens
+    // afterwards on the device and is reported separately. Showing "..."
+    // until the server answered made an instant action look slow.
+    //
+    // It is an honest optimism: on failure the button says so below, and it
+    // is not claiming the call connected, only that the request was made.
+    setState("requested");
+
     const result = await createCallRequest(customerId);
     if ("error" in result) {
       setState("error");
       return;
     }
-    setState("requested");
     // Pull the server's own view back in, so the row's call state and the
     // rest of the page reflect the new request rather than this local flag.
+    // This also clears the client navigation cache (see next.config.ts), so
+    // going back to the list cannot show a pre-request view of this customer.
     router.refresh();
   }
 
   const activeLabel = isCallLifecycleActive(lifecycle) ? CALL_LIFECYCLE_LABELS[lifecycle] : null;
   const label =
-    state === "loading"
-      ? "..."
-      : state === "error"
-        ? "Retry call"
-        : state === "requested"
-          ? "Queued"
-          : (activeLabel ?? "Call");
+    state === "error"
+      ? "Retry call"
+      : state === "requested"
+        ? "Queued"
+        : (activeLabel ?? "Call");
 
   return (
     <button
       type="button"
-      className={[styles.button, size === "md" && styles.md, activeLabel && styles.active, state === "error" && styles.error]
+      className={[
+        styles.button,
+        size === "md" && styles.md,
+        (activeLabel || state === "requested") && styles.active,
+        state === "error" && styles.error,
+      ]
         .filter(Boolean)
         .join(" ")}
       onClick={handleClick}
-      disabled={state === "loading"}
       title={
         activeLabel
           ? `${activeLabel} -- a call request for this customer is already in progress. Click to request again.`

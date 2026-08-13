@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { getCallById } from "@/lib/calls/service";
+import { callExists } from "@/lib/calls/service";
 import { getAiSummaryByCallId, submitAiSummary } from "@/lib/ai-summaries/service";
 
 interface RouteParams {
@@ -29,8 +29,7 @@ const submitAiSummarySchema = z.object({
  */
 export async function GET(request: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const call = await getCallById(id);
-  if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });
+  if (!(await callExists(id))) return NextResponse.json({ error: "Call not found." }, { status: 404 });
 
   const summary = await getAiSummaryByCallId(id);
   if (!summary) {
@@ -47,8 +46,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const call = await getCallById(id);
-  if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });
+  if (!(await callExists(id))) return NextResponse.json({ error: "Call not found." }, { status: 404 });
 
   let body: unknown;
   try {

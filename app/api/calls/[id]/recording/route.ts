@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { getCallById } from "@/lib/calls/service";
+import { callExists } from "@/lib/calls/service";
 import { getRecordingByCallId, registerRecording } from "@/lib/recordings/service";
 import { getStorageProviderInfo } from "@/lib/storage";
 
@@ -19,8 +19,7 @@ const registerRecordingSchema = z.object({
 /** GET /api/calls/{id}/recording -- metadata only, never audio bytes (lib/storage/index.ts). Returns storage-provider status even if no recording is registered yet. */
 export async function GET(request: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const call = await getCallById(id);
-  if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });
+  if (!(await callExists(id))) return NextResponse.json({ error: "Call not found." }, { status: 404 });
 
   const recording = await getRecordingByCallId(id);
   return NextResponse.json({ data: recording, storageProvider: getStorageProviderInfo() });
@@ -35,8 +34,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const call = await getCallById(id);
-  if (!call) return NextResponse.json({ error: "Call not found." }, { status: 404 });
+  if (!(await callExists(id))) return NextResponse.json({ error: "Call not found." }, { status: 404 });
 
   let body: unknown;
   try {

@@ -2,10 +2,12 @@ import { cache } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getCustomerById } from "@/lib/customers/service";
-import { listCallsForCustomer, getCallStatsForCustomer } from "@/lib/calls/service";
+import { getCustomerCallOverview, CALL_HISTORY_PAGE_SIZE } from "@/lib/calls/service";
 import { listCallRequestsForCustomer } from "@/lib/call-requests/service";
 import { listActionsForCustomer } from "@/lib/actions/service";
-import { callLifecycleState, CALL_LIFECYCLE_LABELS, isCallLifecycleActive } from "@/lib/call-requests/lifecycle";
+import { CALL_LIFECYCLE_LABELS, isCallLifecycleActive } from "@/lib/call-requests/lifecycle";
+import { callActivityPulse, callToPulse, requestToPulse } from "@/lib/calls/pulse";
+import { CallActivityRefresher } from "@/components/crm/CallActivityRefresher";
 import { PageHeader } from "@/components/crm/PageHeader";
 import { Avatar } from "@/components/crm/Avatar";
 import { StatusBadge } from "@/components/crm/StatusBadge";
@@ -47,28 +49,44 @@ export default async function CustomerDetailPage({ params }: PageProps) {
   // the actual `calls`/`recordings`/`transcripts`/`ai_summaries` tables
   // (lib/calls/service.ts). A brand new customer legitimately has zero calls;
   // the empty state below reflects that honestly instead of showing sample
-  // data. Stats are computed from the `calls` already fetched rather than by
-  // re-running the same query a second time.
-  const calls = await listCallsForCustomer(id);
-  const stats = await getCallStatsForCustomer(id, calls);
+  // data.
+  //
+  // Four queries for the whole page, whatever the customer's history looks
+  // like: the customer, one joined call-history-plus-stats query, the recent
+  // call requests, and the follow-ups. It was eleven before this pass --
+  // Prisma issues one extra statement per `include`d relation and this
+  // project's Neon adapter serializes them, so the five relations a call needs
+  // cost five extra round trips per call query (see lib/calls/service.ts).
+  const { calls, stats, truncated } = await getCustomerCallOverview(id);
   const callRequests = await listCallRequestsForCustomer(id);
   const actions = await listActionsForCustomer(id);
   const actionsByCallId = new Map(actions.filter((a) => a.callId).map((a) => [a.callId as string, a]));
 
-  // What this customer's calling is doing right now, from the two records
-  // that already describe it (see lib/call-requests/lifecycle.ts) -- no new
-  // status is stored anywhere.
+  // What this customer's calling is doing right now, and whether anything is
+  // still expected to arrive -- both derived from the two records already
+  // fetched above (see lib/calls/pulse.ts, which wraps the same
+  // lib/call-requests/lifecycle.ts derivation the customers list uses). No new
+  // status is stored anywhere, and this costs no additional query: the page
+  // stays at the four it was.
+  //
+  // `pulse.active` is what decides whether this page watches for updates at
+  // all. Computing it here, from the same records the refresher's endpoint
+  // reads, is what lets the two agree on "unchanged" without the page paying
+  // for a fifth round trip to ask.
   const latestRequest = callRequests[0] ?? null;
-  const latestCall = calls[0] ?? null;
-  // The call this request actually produced -- not merely the customer's most
-  // recent call, which can be a different, unrelated one.
-  const requestCall = latestRequest?.callId ? calls.find((call) => call.id === latestRequest.callId) : undefined;
-  const lifecycle = latestRequest
-    ? callLifecycleState(latestRequest.status, requestCall?.status ?? null, Boolean(latestRequest.callId))
-    : callLifecycleState(null, latestCall?.status ?? null, Boolean(latestCall));
+  const pulse = callActivityPulse(calls.map(callToPulse), callRequests.map(requestToPulse));
+  const lifecycle = pulse.lifecycle;
+  const lifecycleLive = isCallLifecycleActive(lifecycle);
 
   return (
     <div>
+      {/* Renders nothing. Watches for this customer's call state changing --
+          outcome, recording, transcript, summary -- and refreshes the page
+          when it actually does, so the active-call workflow never needs a
+          manual browser refresh. Polls only while `active`, and stops on its
+          own; see components/crm/CallActivityRefresher.tsx. */}
+      <CallActivityRefresher customerId={customer.id} version={pulse.version} active={pulse.active} />
+
       <PageHeader
         title={customer.name}
         backHref="/customers"
@@ -77,90 +95,93 @@ export default async function CustomerDetailPage({ params }: PageProps) {
       />
 
       <div className={styles.layout}>
-        <Card className={styles.profileCard}>
-          <div className={styles.profileHead}>
-            <Avatar name={customer.name} size="lg" />
-            <div className={styles.profileHeadText}>
-              <h2 className={styles.name}>{customer.name}</h2>
+        {/* Identity strip. Deliberately one compact band across the top rather
+            than the tall sticky sidebar card this used to be: the profile
+            fields are reference data an agent glances at, while the call
+            information below is what the page is actually for, and the sidebar
+            was taking a quarter of the width away from it on every screen. */}
+        <Card className={styles.identity}>
+          <div className={styles.identityHead}>
+            <Avatar name={customer.name} size="md" />
+            <div className={styles.identityText}>
+              <div className={styles.identityNameRow}>
+                <h2 className={styles.name}>{customer.name}</h2>
+                <StatusBadge status={customer.status} />
+              </div>
               <a href={`tel:${customer.phoneNumber}`} className={styles.phone}>
                 {customer.phoneNumber}
               </a>
-              <div className={styles.statusRow}>
-                <StatusBadge status={customer.status} />
-              </div>
             </div>
-          </div>
-
-          <dl className={styles.fieldGrid}>
-            <ProfileField label="Customer ID" value={customer.id} mono />
-            <ProfileField label="Assigned agent" value={customer.assignedAgent ?? "Unassigned"} />
-            <ProfileField label="Location" value={customer.location ?? "--"} />
-            <ProfileField label="Account created" value={formatDate(customer.accountCreatedAt)} />
-            <ProfileField label="CRM entry date" value={formatDate(customer.crmEntryCreatedAt)} />
-          </dl>
-
-          {customer.notes && (
-            <div className={styles.notes}>
-              <p className={styles.notesLabel}>Notes</p>
-              <p className={styles.notesBody}>{customer.notes}</p>
-            </div>
-          )}
-        </Card>
-
-        <div className={styles.mainColumn}>
-          {latestRequest && (
-            <Card>
-              <CardHeader
-                title="Call request"
-                subtitle="The CRM's most recent Call button press and what Android has done with it"
-              />
-              <div className={styles.requestRow}>
-                <span
-                  className={[styles.requestState, isCallLifecycleActive(lifecycle) && styles.requestStateLive]
-                    .filter(Boolean)
-                    .join(" ")}
-                >
+            {latestRequest && (
+              <div className={styles.requestState}>
+                <span className={[styles.requestLabel, lifecycleLive && styles.requestLive].filter(Boolean).join(" ")}>
                   {CALL_LIFECYCLE_LABELS[lifecycle]}
                 </span>
                 <span className={styles.requestMeta}>
-                  Requested {formatDateTime(latestRequest.requestedAt)} &middot; queue status {latestRequest.status}
+                  Requested {formatDateTime(latestRequest.requestedAt)} &middot; queue {latestRequest.status}
                   {latestRequest.callId ? " · linked to a call" : ""}
                 </span>
               </div>
-            </Card>
+            )}
+          </div>
+
+          <dl className={styles.identityFields}>
+            <ProfileField label="Assigned agent" value={customer.assignedAgent ?? "Unassigned"} />
+            <ProfileField label="Location" value={customer.location ?? "--"} />
+            <ProfileField label="CRM entry" value={formatDate(customer.crmEntryCreatedAt)} />
+            <ProfileField label="Account created" value={formatDate(customer.accountCreatedAt)} />
+            <ProfileField label="Customer ID" value={customer.id} mono />
+          </dl>
+
+          {customer.notes && (
+            <p className={styles.notes}>
+              <span className={styles.notesLabel}>Notes</span>
+              {customer.notes}
+            </p>
           )}
+        </Card>
 
-          <Card>
-            <CardHeader title="Call activity" subtitle="Summary across all recorded calls" />
-            <div className={styles.statsGrid}>
-              <StatCard label="Total calls" value={stats.totalCalls} />
-              <StatCard label="Answered" value={stats.answeredCalls} />
-              <StatCard label="Missed" value={stats.missedCalls} />
-              <StatCard label="Outgoing" value={stats.outgoingCalls} />
-              <StatCard label="Total talk time" value={formatDuration(stats.totalConversationSeconds)} />
-              <StatCard
-                label="Last contacted"
-                value={stats.lastContactedAt ? formatDateTime(stats.lastContactedAt) : "Never"}
-                hint={stats.lastContactedByAgent ? `by ${stats.lastContactedByAgent}` : undefined}
-              />
-            </div>
-          </Card>
+        <Card>
+          <CardHeader title="Call activity" subtitle="Across every recorded call, not just the ones listed below" />
+          <div className={styles.statsGrid}>
+            <StatCard label="Total calls" value={stats.totalCalls} compact />
+            <StatCard label="Answered" value={stats.answeredCalls} compact />
+            <StatCard label="Missed" value={stats.missedCalls} compact />
+            <StatCard label="Outgoing" value={stats.outgoingCalls} compact />
+            <StatCard label="Talk time" value={formatDuration(stats.totalConversationSeconds)} compact />
+            <StatCard
+              label="Last contacted"
+              value={stats.lastContactedAt ? formatDate(stats.lastContactedAt) : "Never"}
+              hint={stats.lastContactedByAgent ? `by ${stats.lastContactedByAgent}` : undefined}
+              compact
+            />
+          </div>
+        </Card>
 
-          <Card>
-            <CardHeader title="Follow-ups" subtitle="Reach-outs, callbacks, and other pending actions for this customer" />
-            <FollowUpList actions={actions} customerId={customer.id} />
-          </Card>
+        <Card padded={false}>
+          <div className={styles.historyHeader}>
+            <CardHeader
+              title="Call history"
+              subtitle={
+                truncated
+                  ? `Latest ${calls.length} of ${stats.totalCalls} calls -- open a row for timings, recording, transcript and summary`
+                  : "Open a row for timings, recording, transcript and summary"
+              }
+              action={<CallRequestButton customerId={customer.id} lifecycle={lifecycle} />}
+            />
+          </div>
+          <CallHistoryTable calls={calls} actionsByCallId={actionsByCallId} customerName={customer.name} />
+          {truncated && (
+            <p className={styles.historyNote}>
+              Showing the {CALL_HISTORY_PAGE_SIZE} most recent calls. The counts above cover all {stats.totalCalls}.
+            </p>
+          )}
+        </Card>
 
-          <Card padded={false}>
-            <div className={styles.historyHeader}>
-              <CardHeader
-                title="Call history"
-                subtitle="Outcome, duration, recording and transcript per call -- open a row to read the transcript"
-              />
-            </div>
-            <CallHistoryTable calls={calls} actionsByCallId={actionsByCallId} />
-          </Card>
-        </div>
+        <Card>
+          <CardHeader title="Follow-ups" subtitle="Reach-outs, callbacks, and other pending actions for this customer" />
+          <FollowUpList actions={actions} customerId={customer.id} />
+        </Card>
       </div>
     </div>
   );
