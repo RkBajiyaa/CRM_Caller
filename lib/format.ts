@@ -44,3 +44,21 @@ export function initials(name: string): string {
 export function shortId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}...` : id;
 }
+
+/**
+ * A plain calendar date (`YYYY-MM-DD`) that has already been resolved in
+ * somebody's local timezone -- an agent-activity day bucket, say.
+ *
+ * Formatted in UTC on purpose. `new Date("2026-08-22")` is midnight *UTC*, so
+ * handing it to `formatDate` re-interprets an already-local date as an instant
+ * and shifts it back a day for every viewer west of Greenwich. This one keeps
+ * the date it was given.
+ */
+export function formatCalendarDate(day: string): string {
+  return new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}

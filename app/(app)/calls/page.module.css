@@ -1,0 +1,41 @@
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.sectionHeader {
+  padding: var(--space-4) var(--space-4) 0;
+}
+
+/* The six numbers a demo audience should be able to read from across a room.
+   Full-size StatCards, not the compact variant -- this strip is the headline. */
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* The breakdown behind them: same cards, compact, so the hierarchy is obvious
+   without a second card or a divider. */
+.secondaryGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.note {
+  margin-top: var(--space-3);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+}
+
+.historyNote {
+  padding: var(--space-3) var(--space-4);
+  font-size: 12px;
+  color: var(--color-text-muted);
+  border-top: 1px solid var(--color-border);
+}

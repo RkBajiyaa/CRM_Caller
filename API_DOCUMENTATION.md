@@ -285,12 +285,29 @@ actually happened on the phone.
   "data": {
     "id": "...", "customerId": "...", "phoneNumber": "+91 98765 43210",
     "customerName": "Priya Sharma", "status": "PENDING", "callId": null,
+    "agentId": "...", "deviceId": "CONBUN-1A2B3C4D",
     "requestedAt": "...", "updatedAt": "..."
   }
 }
 ```
 
-`404` if `customerId` doesn't match a real customer.
+`404` if `customerId` doesn't match a real customer, or if an explicit
+`agentId`/`deviceId` names something that doesn't exist.
+
+**Routing — which phone this request is for** (added 2026-08-22). `agentId`
+and `deviceId` are optional overrides in the body. Send neither — which is
+what the CRM's own Call button does — and the backend resolves them itself:
+the customer's `assignedAgentId`, and that agent's most-recently-seen active
+device. If it can't (unassigned customer, or an agent with no registered
+handset) the request is created **unrouted**, with both fields `null`, and is
+offered to every polling device. That is exactly how every request behaved
+before these columns existed, so nothing already queued and no client that
+ignores the fields is affected.
+
+A malformed `deviceId` here is a `400` — this is the CRM's own call site, and
+an operator typo should be reported rather than swallowed. (The endpoints a
+*phone* uses to report a call treat a bad device id differently; see
+[Device id: strict where it routes, lenient where it reports](#device-id-strict-where-it-routes-lenient-where-it-reports).)
 
 **Idempotent while queued** (added 2026-08-10): if this customer already has
 a `PENDING` request Android hasn't picked up, that same request is returned
@@ -330,7 +347,7 @@ joined into the `INSERT`. The "already queued" and "no such customer" paths
 pay a second statement to tell those two cases apart — the right way round,
 since only one of the three is the path an agent waits on.
 
-### `GET /api/call-requests?status=PENDING&limit=`
+### `GET /api/call-requests?status=PENDING&deviceId=&limit=`
 
 This is Android's polling endpoint. `status` optional — one of
 `PENDING`/`ACCEPTED`/`COMPLETED`/`CANCELLED`/`FAILED`; omit to list all.
@@ -345,6 +362,29 @@ should act on first are always the ones it sees; a pending queue deep enough
 to be truncated is already far deeper than a phone dialing one call at a
 time can work through. Existing callers that don't send `limit` need no
 change.
+
+**`deviceId` — the routing filter** (added 2026-08-22). Optional. A device
+that names itself is offered:
+
+- every request routed **to it**, and
+- every **unrouted** request (`deviceId: null`),
+
+and **never** a request routed to a different device. That is the guarantee:
+a request intended for Device A is not visible to Device B. Unrouted requests
+are included on purpose — excluding them would strand every request the CRM
+cannot route in the queue forever, which is a worse failure than the one this
+prevents. Omit the parameter and you get the whole queue exactly as before.
+
+Naming a device here also **registers it on first contact** and refreshes its
+`lastSeenAt`, in the same statement as the query, at no extra round trip. An
+unrecognised `deviceId` is therefore not an error — it is a new phone, and the
+CRM records it rather than turning it away.
+
+A **malformed** `deviceId` is a `400` here, deliberately: silently dropping
+the filter would hand this phone the whole queue, including other phones'
+requests, which is the one outcome the parameter exists to prevent. Conbun
+Call guards this call site itself (`CallRequestPoller.crmSafeDeviceId`) and
+omits the parameter rather than sending an unusable value.
 
 ### `GET /api/call-requests/{id}`
 
@@ -367,6 +407,14 @@ Returns one request, or `404`.
 is accepted but pointless, there's no "un-accept"). `404` if the request
 doesn't exist.
 
+An optional **`deviceId`** (added 2026-08-22) lets the accepting device record
+that it was the one that took the request. It only ever *fills in* an unrouted
+request: a request already aimed at Device A keeps saying Device A even if
+another device PATCHes it, so the audit trail cannot be rewritten by a
+mis-configured client. An unknown device id is registered on the spot. An
+unusable one is dropped, never rejected — a bad device id must not stop a
+request being accepted or completed.
+
 ## Calls
 
 A call always belongs to a customer via `customerId` — never resolved from
@@ -376,7 +424,12 @@ A call always belongs to a customer via `customerId` — never resolved from
 
 ```json
 // Request
-{ "customerId": "...", "phoneNumber": "+91 98765 43210", "direction": "OUTGOING", "agentId": null, "startedAt": null, "callRequestId": null }
+{
+  "customerId": "...", "phoneNumber": "+91 98765 43210", "direction": "OUTGOING",
+  "agentId": null, "startedAt": null, "callRequestId": null,
+  "deviceId": "CONBUN-1A2B3C4D",
+  "clientCallId": "CONBUN-1A2B3C4D:9351812941_1755859660212"
+}
 ```
 
 `customerId` must already exist (`404` otherwise — resolve/create the
@@ -392,12 +445,76 @@ unknown `callRequestId` doesn't fail call creation, it's just not
 linked). Omit it entirely for calls that didn't originate from a request
 — nothing else about this endpoint changes.
 
+#### Reporting the same call twice never creates a second record
+
+Added 2026-08-22. `POST /api/calls` is the only request that creates a row,
+and an Android retry, a network retry, an app restart mid-report, an offline
+queue flushing, or a manual "Send to CRM" all send the same report again.
+Each one used to produce another `calls` row, so a customer's history quietly
+filled with phantom duplicates.
+
+The report is now matched against the call it is already about, by either of
+two identities:
+
+| Key | Covers |
+|---|---|
+| **`clientCallId`** | Any call, however many times it is re-sent. The client's own stable key. |
+| **`callRequestId`** | Every CRM-initiated call, with no change on the phone — `CallRequest.callId` is already unique, so a fulfilled request names exactly one call. |
+
+When either matches, the **existing call is returned untouched** with **`200`**
+instead of a new one with `201`. Both are success responses carrying the same
+`{ "data": <call> }` shape, so a client that only checks for 2xx — which every
+current client does — needs no change to benefit. *Untouched* is deliberate: a
+retry must never overwrite an outcome, duration or device that the first report
+(or the `PATCH` after it) already established.
+
+`clientCallId` must be **unique across every device**, so namespace it per
+device. Conbun Call sends `"<deviceId>:<callKey>"`, where `callKey` is its own
+per-call identity (number + call start) — deliberately not the OS CallLog row
+id, which can be reassigned if the system call log is cleared and re-synced,
+and an idempotency key that changes for the same call defeats the mechanism.
+
+`deviceId` records which handset reported the call. An unknown device id is
+**registered on the spot**, in the same statement as the insert — a call must
+never be lost because the CRM had not been told about a handset yet.
+
+#### Which agent the call is recorded against (added 2026-08-22)
+
+`agentId` is resolved server-side in descending order of authority:
+
+| Order | Source | Why it is authoritative |
+|---|---|---|
+| 1 | **`agentId` in this request** | The reporting client's own answer. Never overridden. |
+| 2 | **`callRequestId`'s `agentId`** | The CRM raised that request *for* that agent, so the call fulfilling it is that agent's. |
+| 3 | **`deviceId`'s assigned agent** | Which handset belongs to whom is configuration an admin entered in the CRM. |
+
+Otherwise `null`, which keeps its meaning: *we have not been told*. Nothing is
+inferred from the customer's assigned agent — who owns the relationship is not
+who placed the call (CLAUDE.md rule #3).
+
+This exists because Conbun Call's `agentId` comes from a free-text Settings
+field that is routinely left blank, and every call from that phone then counted
+for nobody — including calls the CRM had itself routed to a named agent seconds
+earlier. **No client change is required to benefit**, and a client that does
+send `agentId` is unaffected.
+
 ### `PATCH /api/calls/{id}` — the call result
 
 ```json
 // What ConbunCall_V4 sends today. Unchanged, still correct, still complete.
 { "status": "ANSWERED", "endedAt": "2026-08-08T16:00:00Z", "durationSeconds": 142 }
 ```
+
+An optional **`deviceId`** (added 2026-08-22) is accepted here too, for a client
+that only learns its device id at finish time. It is **fill-in only**: it sets
+the device on a call that has none yet and never overwrites one already
+recorded, because which phone made a call is a fact about the past. When it
+does fill one in, the call's **`agentId` is filled in the same way** from that
+handset's assigned agent — again only if the call has no agent yet, and never
+over one already recorded (see the resolution order under `POST /api/calls`). Everything
+else on this endpoint is a plain patch of stated fields, so sending the same
+result twice writes the same values twice and changes nothing — it is naturally
+safe to retry.
 
 ```json
 // Everything this endpoint will accept. Every field is optional.
@@ -450,6 +567,111 @@ that as "In progress" rather than inventing an outcome.
 ### `GET /api/calls/{id}`
 
 Returns one call (same shape as the list above).
+
+## Devices — the physical phones Conbun Call runs on
+
+Added 2026-08-22. One row per handset. This is the Agent ↔ Device half of the
+**Agent + Device + Customer + Call** relationship: it is what lets the CRM
+answer *which phone should place this call*, and *which phone reported this
+one*.
+
+**`id` is supplied by the device, not generated by the CRM** — the one
+deliberate departure from this API's usual "the backend generates identity"
+rule, and not really a departure: for a phone, the phone *is* the identity.
+Conbun Call already generates and persists a stable `CONBUN-<8 hex>` id in its
+own settings (`SettingsRepository.ensureDeviceIdGenerated`), it survives app
+restarts, and it is the value it sends on every request. Minting a second
+CRM-side id would mean a mapping table whose only job is translating one stable
+string into another. Note the contrast with `Customer.phoneNumber`: a phone
+*number* is a mutable attribute of a person; a device id is the device's own
+name for itself.
+
+**Unknown devices are registered, never rejected.** A phone reporting a call
+the CRM has never heard of is still reporting a real call. Registration happens
+implicitly on the call-request poll, on `POST /api/calls`, and on
+`PATCH /api/call-requests/{id}` — so calling `POST /api/devices` at all is
+optional. An auto-registered device arrives **unassigned** (`agentId: null`),
+which is honest and visible in the CRM so an admin can link it.
+
+Device shape:
+
+```json
+{
+  "id": "CONBUN-1A2B3C4D",
+  "label": "Rahul's Pixel",
+  "agentId": "...", "agentName": "Rahul",
+  "isActive": true,
+  "lastSeenAt": "2026-08-22T09:14:52.183Z",
+  "createdAt": "...", "updatedAt": "..."
+}
+```
+
+`lastSeenAt` is refreshed by the device's own call-request poll (throttled to
+at most once a minute — Conbun Call polls every 4 seconds, and this is only
+ever read at minute granularity). It is what lets the CRM tell **"Android
+hasn't sent this yet"** apart from **"this failed"**: a device that stopped
+polling an hour ago is offline, and its silence is not a failure. `null` means
+it has never been heard from. The CRM calls a device online if it was seen
+within the last **3 minutes**; that is presentation only — nothing about a
+device being offline marks any call, request, transcript or summary as failed.
+
+### `GET /api/devices`
+
+Every registered handset with the agent it belongs to, assigned first, then
+oldest. `{ "data": [ <device>, ... ] }`.
+
+### `POST /api/devices`
+
+```json
+{ "id": "CONBUN-1A2B3C4D", "label": "Rahul's Pixel", "agentId": "..." }
+```
+
+`deviceId` is accepted as an alias for `id`, since that is what the field is
+called on every other endpoint here. `201` with the device; `404` if `agentId`
+doesn't name a real agent.
+
+**Idempotent**: the same `id` always lands on the same row, so a phone
+re-registering on every app start creates nothing new. A re-registration that
+omits `label`/`agentId` never clears what an admin set in the CRM.
+
+### `GET /api/devices/{id}` / `PATCH /api/devices/{id}`
+
+`PATCH` is CRM-side administration and the endpoint that establishes **Agent A
+→ Device A**:
+
+```json
+{ "label": "Rahul's Pixel", "agentId": "...", "isActive": true }
+```
+
+`"agentId": null` explicitly unassigns; omitting the field leaves the
+assignment untouched. Retiring a device (`"isActive": false`) stops it being
+chosen to receive new call requests but changes nothing about the calls it has
+already reported. `404` if the device doesn't exist or `agentId` doesn't name a
+real agent.
+
+### Device id: strict where it routes, lenient where it reports
+
+A device id is `1–128` characters of `[A-Za-z0-9._:-]`. What happens to one
+that isn't depends entirely on what the request would have cost:
+
+| Endpoint | Malformed `deviceId` | Why |
+|---|---|---|
+| `GET /api/call-requests?deviceId=` | **400** | Dropping the filter would hand this phone another phone's queue — the one outcome the parameter prevents. |
+| `POST /api/call-requests` | **400** | The CRM's own call site. An operator typo should be reported. |
+| `POST /api/calls` | **dropped**, call still created | This request carries the call itself. No attribution column is worth losing a call, its outcome, its transcript and its summary over. |
+| `PATCH /api/calls/{id}` | **dropped**, outcome still stored | Same. |
+| `PATCH /api/call-requests/{id}` | **dropped**, status still applied | A bad device id must not stop a request being accepted or completed. |
+
+This is not an inconsistency, it is the same rule with the failure mode chosen
+per endpoint: an id that can't be used is treated as an id that wasn't sent,
+which the whole devices design already handles honestly ("we don't know which
+handset", never a guess). It matters because Conbun Call's device id is a
+**user-editable Settings field** and it sends the raw value on the reporting
+endpoints — only its poll goes through its own guard. An over-long
+`clientCallId` (which Conbun Call builds from that same unbounded id) is
+dropped for the same reason, rather than truncated: a silently shortened
+idempotency key is worse than none, because two different calls could collide
+on it.
 
 ## Recordings — metadata only, no audio bytes
 
@@ -598,6 +820,58 @@ anything.
 ```json
 { "name": "...", "role": "ADMIN", "isActive": false }
 ```
+
+### `GET /api/agents/{id}/activity?range=&from=&to=&tz=`
+
+Added 2026-08-22. What one agent actually did over a window of time — the data
+behind the CRM's Agent Activity page.
+
+`range` defaults to `month`; `from`/`to` accept `YYYY-MM-DD` or a full ISO
+instant and imply `range=custom`. `tz` is the caller's offset from UTC in
+minutes exactly as `Date.getTimezoneOffset()` reports it (IST = `-330`), so
+"today" means the caller's today rather than the server's; omitting it means
+UTC. `limit` bounds the `calls` list only. `404` if the agent doesn't exist.
+
+```json
+{
+  "data": {
+    "agent": { ... },
+    "devices": [ ... ],
+    "range": { "preset": "month", "from": "...", "to": null },
+    "stats": { ... },
+    "days": [ { "date": "2026-08-13", "calls": 11, "answered": 5, "talkTimeSeconds": 78, "uniqueCustomers": 3 } ],
+    "calls": [ ... ]
+  }
+}
+```
+
+**CRM-only and additive.** Conbun Call neither calls this nor needs to know it
+exists — it reads the `calls` rows Android already writes.
+
+`stats` carries `totalCalls`, `answeredCalls`, `missedCalls`, `rejectedCalls`,
+`failedCalls`, `unreportedCalls`, `incomingCalls`, `outgoingCalls`,
+`totalTalkTimeSeconds`, `averageCallSeconds`, `uniqueCustomers`,
+`customersReached`, `customersNotReached`, `repeatCustomers`, `firstCallAt`,
+`lastCallAt`.
+
+Three things this deliberately does **not** report:
+
+- **No idle time.** The CRM knows when calls happened and how long they lasted.
+  It does not know whether the gaps were meetings, breaks or admin work, and
+  labelling them idle would be inventing attendance data the system has never
+  been given. If work-session data ever exists, "unaccounted time" becomes
+  computable then — not before.
+- **`unreportedCalls` is not `failedCalls`.** A call started but whose outcome
+  never arrived (`status: null`) is counted and named separately. "We have not
+  been told yet" is a different fact from "it failed", and an Android app that
+  was offline or killed mid-call produces exactly this.
+- **`averageCallSeconds` is a mean over answered calls only.** Dividing talk
+  time by calls nobody picked up would report an "average call" shorter than
+  any call that actually happened.
+
+The aggregates are computed in Postgres over **every** call in the window;
+`calls` is a bounded list. They are not the same set, and the CRM's page says
+so rather than letting the two quietly disagree.
 
 ## Health check
 

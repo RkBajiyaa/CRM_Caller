@@ -23,6 +23,12 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  * status" (`{"status": "COMPLETED" | "FAILED" | "CANCELLED"}`, optionally
  * with `callId` once the real Call has been reported) both go through
  * here -- same endpoint, different status values.
+ *
+ * An optional `deviceId` may be sent alongside, and is how a device records
+ * that it was the one that took an *unrouted* request. It never re-points a
+ * request that was already routed to another device (see
+ * lib/call-requests/service.ts), so it cannot be used to rewrite the record of
+ * which phone handled a call.
  */
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
   const { id } = await params;

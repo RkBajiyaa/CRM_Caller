@@ -2505,3 +2505,493 @@ kept.
   panel. Worth one manual click on `/customers/eef0e5a1-c67e-4ab0-863d-1491643cd208`.
 - Unchanged and still true from 2026-08-10: `answeredAt` has no producer, and
   the 14 stale `ACCEPTED` call requests remain untouched.
+
+---
+
+## 2026-08-22 — Devices, call routing, call idempotency, agent activity: resumed the interrupted sprint, closed a contract mismatch, and made the demo data legitimate
+
+Resumed a session that had been interrupted near its limit. The prior pass
+(2026-08-21, ~18:00–19:30) had left **code written, migrated and working but
+undocumented**, plus five fabricated call records in the production database.
+This entry covers the verification of that work, the new work on top of it,
+and the cleanup.
+
+**Files created (this pass):**
+- `app/(app)/agents/[id]/loading.tsx`
+
+**Files created (previous pass, verified here, documented for the first time):**
+- `prisma/migrations/20260822120000_add_devices_call_routing_and_call_idempotency/`
+- `lib/devices/{service,types,validation}.ts`
+- `lib/agents/{activity,activity-range}.ts`
+- `lib/api-client/devices.ts`
+- `app/api/devices/route.ts`, `app/api/devices/[id]/route.ts`
+- `app/api/agents/[id]/activity/route.ts`
+- `app/(app)/agents/[id]/page.tsx` + `page.module.css`, `app/(app)/agents/page.module.css`
+- `components/crm/{AgentCallsTable,DevicesTable,ActivityRangeFilter}.tsx` + modules
+
+**Files modified (this pass):**
+- `lib/devices/validation.ts` — added `reportedDeviceIdSchema`.
+- `lib/calls/validation.ts` — `deviceId` and `clientCallId` on `POST /api/calls`,
+  and `deviceId` on `PATCH /api/calls/{id}`, are now dropped rather than
+  rejected when unusable.
+- `lib/call-requests/validation.ts` — same for `PATCH /api/call-requests/{id}`.
+- `lib/agents/service.ts` — added `getAgentWithDevices`.
+- `app/(app)/agents/[id]/page.tsx` — uses it; four queries → three.
+- `components/crm/AgentsTable.tsx` — `HoverPrefetchLink` instead of `Link`.
+- `components/crm/CallHistoryTable.tsx`, `components/crm/AgentCallsTable.tsx` —
+  added `recordingBadge()`.
+- `API_DOCUMENTATION.md`, `ANDROID_API_INTEGRATION.md` — the previously
+  undocumented endpoints and contract.
+
+**Files deleted:** none.
+
+### 1. Verification of the previous, undocumented pass
+
+Checked against the source and the live database rather than the checkpoint
+summary:
+
+| Claimed | Verified |
+|---|---|
+| devices table, agent/device association | **Yes** — `devices` table present, migration applied (`prisma migrate status`: "Database schema is up to date"). |
+| `agentId`/`deviceId` on call requests and calls | **Yes** — columns, FKs and indexes all present in the applied migration. |
+| device-aware routing, auto-registration, `lastSeenAt` | **Yes** — `listCallRequests`' data-modifying CTE, `resolveDeviceIdForAgent`, the `INSERT … ON CONFLICT` in `registerDevice`. |
+| call idempotency via `clientCallId`/`callRequestId` | **Yes** — `calls_client_call_id_key` unique index + `findExistingCallId`. |
+| agent activity, statistics, customer reach, date filtering | **Yes** — one `UNION ALL` statement in `getAgentActivity`. |
+| device in call history; "Not available" vs "Failed" | **Yes** for transcript/summary; **incomplete** for recording — see §4. |
+| TypeScript / lint / build clean | **Yes**, re-run here. |
+| 63/63 integration checks | **Yes** — the suite was found in the previous session's scratchpad and re-run here. This pass added 16 checks; the extended suite reports **79**, and 79 − 16 = 63, so the previous figure was exact. |
+| API documentation, Android documentation, CHANGELOG | **No** — none had been written. This entry and this pass close all three. |
+| real-device testing, deviceId end-to-end | **No**, and still not — see §8. |
+
+**Also found: five fabricated calls left in the production database**, created
+2026-08-21 18:56–19:23 by manual probes that were never cleaned up. Identified
+by `created_at` disagreeing with `started_at` (two of them stamped an identical
+`2026-08-20T09:00:00.000Z`), by a recording key of
+`content://…/tree/x/y.m4a`, and by a transcript reading "Sprint verification
+transcript." They were indistinguishable from real activity in the CRM UI.
+
+### 2. Cross-project check — the Android side is the reference
+
+Read `ConbunCall_V4`'s own 2026-08-22 CHANGELOG entry, `BackendDtos.kt`,
+`BackendApiService.kt`, `CallRequestPoller.kt` and `CallSessionTracker.kt`.
+No Android file was modified (CLAUDE.md §1).
+
+The two projects **agree on the contract**. That entry had already established
+the same thing from the other direction, by probing the live deployment. Full
+item-by-item table in `ANDROID_API_INTEGRATION.md`.
+
+**One real mismatch, and it was the CRM that was wrong.** `CallSessionTracker`
+sends the **raw, user-editable Settings device id** on `POST /api/calls`
+(lines 410 and 980) and builds `clientCallId` as `<deviceId>:<callKey>` from
+it; only `CallRequestPoller` guards the value, via `crmSafeDeviceId`. The
+previous pass validated `deviceId` with the same strict schema on every
+endpoint — so a stray space in that Settings field would have answered
+**400 to every call report from that handset**, losing the call, its outcome,
+its recording, its transcript and its summary in order to protect an
+attribution column. `clientCallId`'s 200-character cap could fail the same way.
+
+Fixed on the CRM side, since the CRM is the side that chose to reject:
+
+- `POST /api/calls`, `PATCH /api/calls/{id}`, `PATCH /api/call-requests/{id}`
+  now **drop** an unusable `deviceId`/`clientCallId` (`reportedDeviceIdSchema`,
+  `.catch(null)`). An id that can't be used is treated as one that wasn't sent.
+- `GET /api/call-requests?deviceId=` and `POST /api/call-requests` stay
+  **strict 400**. Dropping the routing filter would hand one phone another
+  phone's queue, which is the one thing the parameter exists to prevent, and
+  Android already guards that call site.
+- `clientCallId` is dropped, never truncated: a silently shortened idempotency
+  key is worse than none, because two different calls could collide on it.
+
+No Android change is required, and `crmSafeDeviceId` should stay as it is.
+
+### 3. Agent section performance — measured, not guessed
+
+The complaint was that opening an agent takes too long. Two real causes, both
+measured against the real Neon database from this machine:
+
+1. **Round-trip count.** Every statement costs ~270 ms whatever it asks for —
+   the cost is the network, not the query. The page made four in sequence.
+   `getAgentWithDevices` folds the agent and its handsets into one `LEFT JOIN`,
+   making it three. A/B over five interleaved runs: **median 1290 ms → 1025 ms**
+   (4-query: 1217/1347/1242/1432/1290; 3-query: 1041/1010/821/1025/1026).
+2. **Nothing was prefetched.** `/agents/[id]` is `force-dynamic`, and Next.js
+   prefetches a dynamic route only as far as its `loading` boundary — of which
+   this route had none. So a plain `<Link>` prefetched *nothing*, and every one
+   of those round trips happened after the click. The agents list now uses
+   `HoverPrefetchLink`, the component the customers list already uses: the full
+   page is fetched on hover/focus/touch, so the click renders from memory.
+   Gated on intent rather than `prefetch={true}`, or a six-row list would render
+   six full activity pages server-side to serve one click.
+
+A `loading.tsx` was added as well, shaped like the real page. It is explicitly
+**not** the fix — it is what the route shows for a keyboard or direct-URL
+arrival, which the prefetch cannot cover. Without any boundary, Next.js has
+nothing to stream and the browser sits on the previous page.
+
+**Not done, and why.** `Promise.all` is ruled out for this project (CLAUDE.md,
+2026-08-10: this adapter serializes concurrent queries and pays connection
+setup per one, making parallel *slower*) — fewer queries is the only lever.
+Merging the activity aggregate and the call list into one statement would
+require casting two unrelated column sets together for one more round trip,
+and was judged not worth the fragility on a path that reports call data. The
+existing indexes already cover both (`calls(agent_id, started_at)`).
+
+### 4. Recording: "Failed" on a call nobody answered
+
+Requirement 6 says not to show "Failed" merely because something is
+unavailable. Transcript and summary were already fixed (2026-08-12); recording
+was explicitly left alone then and was still wrong.
+
+Found in the data: exactly one such row — call `455b6a49`, **MISSED**,
+0 seconds, with a recording registered as `FAILED` and **no `storageKey`**.
+Conbun Call runs recording discovery for a missed call too, finds nothing
+because there was nothing to find, and reports the failure honestly; the CRM
+then printed "Failed" against a missed call, which reads as a broken recorder.
+
+`recordingBadge()` now reads "Not available" when **all three** hold: status
+`FAILED`, no `storageKey`, and the call was not `ANSWERED`. Deliberately
+narrow — an **answered** call whose recording failed keeps its "Failed",
+because that one is genuinely worth chasing. The expanded row's "State" fact
+was changed to print the same wording, so opening a row can't contradict the
+badge that was just clicked. Verified on the rendered page: that customer went
+from 1 "Failed" to 0, and the missed call now reads "Not available" in all
+three columns.
+
+### 5. Demo data — legitimate, and nothing fabricated
+
+All four changes were put to the user first and approved before any write.
+
+- **Three demo agents created**: Rahul, Kewal, Akhilesh. (Passwords are
+  required by the schema but unused — there is no authentication in this build,
+  CLAUDE.md §3.12 — so they are random and were never printed.)
+- **19 existing calls attributed to Rahul.** The rule is stated rather than
+  convenient: every call in the **real-device testing window, 2026-08-11 →
+  2026-08-13**. Each of those 19 carries a recording, a transcript, a summary
+  or a linked CRM call request, so each is provably Android-reported, and
+  CLAUDE.md dates the first real-device run to 2026-08-10. Result, all of it
+  real: 19 calls, 10 answered, 1 missed, 8 started-but-never-reported, 8:07
+  talk time, 4 unique customers, 4 reached, 3 called more than once.
+- **Four calls deliberately left unattributed** (2026-08-08, customer
+  "kapish"). They predate any real-device run and were most likely created by
+  API tests. Attributing them would have been a guess dressed as a measurement.
+- **Four customers assigned to Rahul** (rahul, Kewalya, Akhilesh, kapish) — the
+  real, non-`(Test)` customers in those 19 calls. This is configuration, not
+  activity: it is what makes `POST /api/call-requests` route to Rahul's device.
+  `Customer.assignedAgent` (the denormalized display copy) was set in step,
+  per CLAUDE.md rule #3.
+- **The five fabricated calls were deleted**, with their fake recording,
+  transcript and summary (cascade) and their two fixture call requests. Listed
+  by explicit id in the cleanup script rather than matched by a pattern, so it
+  could not widen to real data. Database after: 23 calls, 19 attributed, 9
+  recordings, 12 transcripts, 11 summaries — every one of them real.
+
+**What is still missing for the device demo.** No `Device` row exists, because
+no device id is knowable from here: it lives in the phone's own settings, this
+work is not deployed so the phone has never registered itself, and `adb devices`
+is empty in this environment. Inventing a `CONBUN-…` row would create a device
+that matches no real phone and would silently mis-route every request aimed at
+it. Instead: the moment the phone polls the deployed CRM it auto-registers, and
+the Agents page's Devices table assigns it to Rahul in one click (or `PATCH
+/api/devices/{id}` with `{"agentId": "<Rahul's id>"}`).
+
+Also worth knowing for the presentation: Rahul's activity is **2026-08-11 →
+2026-08-13**, so "Today" and "This week" correctly read zero. Use "This month"
+or "All time".
+
+### 6. Verified and deliberately NOT changed
+
+- **The whole call-request → dial → report → transcript → summary path.** The
+  services were read end to end and found correct; nothing in them was
+  rewritten.
+- **The navigation cache** (`staleTimes: { dynamic: 30, static: 180 }`,
+  `HoverPrefetchLink`, `CallActivityRefresher`) — still present, still
+  configured, and now extended to the agents list rather than being replaced.
+- **The customer call-history table's structure**, which already showed
+  date/time, agent, device, direction, outcome, duration and the three pipeline
+  states with "Not available" where appropriate. Only the recording badge rule
+  changed.
+- **`getAgentActivity`'s single `UNION ALL` statement** — the pattern is right
+  and the indexes cover it.
+- **The 35 stale `ACCEPTED` call requests** (real; Android accepted them and
+  never completed them). Untouched, as in every prior pass.
+- **No DELETE endpoint was added** to clean up after the test suite. The API
+  has none by design; the suite now writes the exact SQL to undo itself instead
+  of an endpoint being invented for a test's convenience.
+
+### 7. Tests and builds — actually executed
+
+- `npx tsc --noEmit` — clean (before and after).
+- `npm run lint` — clean (before and after).
+- `npm run build` — succeeded, all 27 routes.
+- `npx prisma migrate status` — 7 migrations found, database schema up to date.
+- **Integration suite, extended and run against `npm run start` + the real Neon
+  database: 79 checks, 0 failures.** Sixteen are new this pass:
+  - a malformed `deviceId` on `POST /api/calls` still creates the call, and the
+    unusable id is dropped rather than stored or guessed;
+  - a malformed `deviceId` on `PATCH /api/calls/{id}` still stores the outcome;
+  - an over-long `clientCallId` still creates the call;
+  - a malformed `deviceId` on `PATCH /api/call-requests/{id}` still applies the
+    status;
+  - a malformed `deviceId` on the poll and on `POST /api/call-requests` is
+    **still** rejected with 400;
+  - the poll's response carries exactly the keys `CallRequestDto` declares, and
+    a device's poll can never contain another device's request;
+  - `POST /api/calls` and `PATCH /api/calls/{id}` still work with only the
+    original fields Conbun Call sends.
+- **Every record the suite created was deleted afterwards** (1 customer, 9
+  calls, 3 requests, 2 devices), and the database re-verified back to its demo
+  state: 23 calls, 19 attributed.
+- Pages rendered and read from the running production server: `/agents`,
+  `/agents/{Rahul}?range=month&tz=-330`, and a real customer's detail page.
+
+### 8. Incomplete / still requiring verification
+
+- **No real-device test was performed.** No Android device was connected, so
+  nothing below was exercised on a phone: device auto-registration from the
+  poll, `lastSeenAt`, `deviceId` reaching `calls` from a real handset,
+  `clientCallId` from `CallSessionTracker`, or device-to-device routing
+  isolation. All of it is verified against the API with synthetic device ids
+  only.
+- **This work is not deployed.** `ConbunCall_V4`'s 2026-08-22 entry confirmed
+  by probe that the Vercel deployment still 404s `GET /api/devices`. Until it
+  ships, Android's `deviceId`/`clientCallId` are accepted and dropped there,
+  and no routing happens in production.
+- **`answeredAt` still has no producer** — unchanged and still true from
+  2026-08-10.
+- The three pre-existing agents (`Dev Admin`, `Test Agent - Neha Verma`,
+  `Test Agent - Amit Rathore`) are still active and appear in the Agents list
+  with no activity. Left alone rather than deactivated, since that was not
+  asked for; the list's own "Deactivate" button handles it if wanted.
+
+---
+
+## 2026-08-22 (later pass) — The Calls section, honest agent attribution, and the "Dialing" that never stopped
+
+A presentation-readiness pass: QA, data correctness, speed and clarity, ahead
+of a demonstration to management. Scope discipline was the point — most of the
+CRM was read, measured and deliberately left alone (§6).
+
+**Files created:**
+- `app/(app)/calls/page.tsx`, `app/(app)/calls/page.module.css`,
+  `app/(app)/calls/loading.tsx` — the Calls section.
+
+**Files renamed:**
+- `components/crm/AgentCallsTable.{tsx,module.css}` →
+  `components/crm/CallsTable.{tsx,module.css}`. It is no longer one agent's
+  table: the Calls page uses the same component with `showAgent`, which adds
+  the Agent column. Keeping the old name would have left the next session
+  reading "AgentCallsTable" on a team-wide page.
+
+**Files modified:**
+- `lib/calls/service.ts` — agent resolution in `startCall` and `updateCall`;
+  new `getCallActivity` and `listCalls`; `startedAt` added to the pulse inputs.
+- `lib/call-requests/lifecycle.ts` — `CALL_IN_FLIGHT_WINDOW_MS`; staleness in
+  `callStatusToLifecycle` and `callLifecycleState`.
+- `lib/calls/pulse.ts` — `CallPulse.startedAt`, passed into the lifecycle.
+- `components/crm/Sidebar.tsx` — Calls is a real nav item.
+- `components/crm/CallsTable.tsx`, `components/crm/CallHistoryTable.tsx` —
+  agent column, staleness-aware outcome badge, "Not available" for a recording
+  that was never registered, hover prefetch on the customer link.
+- `components/crm/StatCard.module.css`, `app/globals.css` — contrast.
+- `app/(app)/customers/page.tsx`, `app/(app)/agents/[id]/page.tsx` — call sites.
+- `API_DOCUMENTATION.md`, `ANDROID_API_INTEGRATION.md`.
+
+**Files deleted:** none.
+
+### 1. The Calls section (it did not exist)
+
+The sidebar had "Calls" as a disabled *Soon* placeholder; call data only ever
+appeared inside a customer or an agent. `/calls` is now a real page:
+
+- **The same date filter the Agent page uses** — Today / This week / This month
+  / All time / Custom, resolved on the *viewer's* calendar via the `tz` the
+  filter sends (`ActivityRangeFilter`, reused as-is, not reimplemented).
+- **Headline numbers over every call in the window**: total, answered (with
+  customers reached), missed, talk time, average call, unique customers; then a
+  compact second row — outgoing, incoming, rejected, failed, *no outcome yet*,
+  agents calling. Plus first/last call, how many devices reported, and how many
+  calls arrived with no agent recorded.
+- **The call log**: date/time, customer, agent, device, direction, outcome,
+  duration, recording, transcript, summary, and the transcript/summary text in
+  place on the row.
+
+**Only metrics the data actually supports.** Talk time is `SUM(duration_seconds)`
+over ANSWERED calls and nothing else; the average divides by answered calls, not
+by all of them; "reached" means at least one answered call. There is no idle
+time, no utilisation, no projection. A call whose outcome was never reported is
+counted and *named* as that, never folded into "failed", and unattributed calls
+are shown as their own number rather than quietly divided among agents.
+
+**Two queries for the page**, whatever the volume: one aggregate over the whole
+window, one bounded list of 50. Sequential, per CLAUDE.md's 2026-08-10 note.
+Both are served by existing indexes (`calls(started_at)`); no migration.
+
+`Reports` stays a *Soon* placeholder: agent reporting lives in the Agents
+section, and inventing a second page that links to it would be worse than the
+honest label. Nothing else in the navigation changed.
+
+### 2. Calls arriving with no agent — fixed at the source, and in the data
+
+Three real calls placed from the test handset that morning (2026-08-22
+03:55–04:03 UTC; real Android recording paths, one with a transcript and
+summary, one fulfilling a CRM call request) had landed with `agent_id NULL`.
+They counted for nobody in agent reporting. Cause: `agentId` is a free-text
+field in Conbun Call's Settings, it is blank on that phone, and the CRM stored
+exactly what it was sent.
+
+`POST /api/calls` now resolves the agent in descending order of authority:
+
+1. what the client sent (never overridden),
+2. the linked **call request's** `agentId` — the CRM raised that request for
+   that agent,
+3. the reporting **device's** assigned agent — configuration an admin entered
+   here,
+4. otherwise `null`, which keeps meaning "we have not been told".
+
+Both fallbacks are scalar subqueries inside the INSERT that already runs — no
+extra round trip. `PATCH /api/calls/{id}` fills the agent the same way when its
+`deviceId` fills in a call that had none, and never over one already recorded.
+Nothing is ever taken from the customer's assigned agent: who owns the
+relationship is not who placed the call (CLAUDE.md rule #3).
+
+**The three calls were attributed to Rahul** — put to the user and approved
+before the write, by explicit id list, with an `agent_id IS NULL` guard so the
+statement could not widen. Same rule the existing 19 used: device-reported (a
+real recording key or a linked CRM request) means the one test handset, which
+is Rahul's. Database after: **26 calls, 22 attributed, 4 deliberately not** (the
+2026-08-08 "kapish" and "(Test) Priya Sharma" rows, which predate any device
+run — attributing those would be a guess dressed as a measurement).
+
+### 3. "Dialing", forever — the CRM's own stalest claim
+
+The customers list showed **almost every row as "Dialing"**, with the Call
+button replaced by that state, and the last-call column showing it in place of
+a date. Saurabh — nought calls, ever — read "Dialing". Cause: 35 call requests
+that Android accepted long ago and never completed (real, and known since
+2026-08-11), plus 12 calls whose outcome was never reported. `ACCEPTED` mapped
+to DIALING and `status IS NULL` mapped to IN_PROGRESS with no reference to the
+clock, so both states were permanent.
+
+Two consequences, both real: the list *looked* like the whole directory was
+mid-call, and `isCallLifecycleActive` kept `CallQueueRefresher` and
+`CallActivityRefresher` polling — a request every few seconds, for up to twenty
+minutes, on a page where nothing could ever change.
+
+Fixed as a **reading** rule, not a data edit: `CALL_IN_FLIGHT_WINDOW_MS`
+(1 hour — far longer than any call this CRM has recorded, so a genuinely long
+call is never mislabelled). Past it, an unfinished call and an accepted-and-
+silent request both read **"Outcome unknown"**, which is what the records
+actually say. `PENDING` is deliberately *not* aged out: Android is handed every
+pending request the next time it polls, so that one really is still queued.
+Nothing was written to the database, and a live call still reads Queued →
+Dialing → In progress exactly as before (verified by the integration suite,
+which exercises that path with fresh timestamps).
+
+Result on the real data: every customer row now shows its true last-call date
+and a working **Call** button, and a quiet CRM makes no requests at all.
+
+### 4. Clarity, without a redesign
+
+- `--color-text-muted` #6b7280 → **#4b5563**, `--color-text-subtle` #9ca3af →
+  **#6b7280**. The old subtle grey cleared ~2.5:1 on white — under WCAG's 4.5:1
+  and visibly faded on a projector, which is what this gets demonstrated on.
+  Two token values; no layout, border, badge or brand colour moved.
+- `StatCard`'s label is muted rather than subtle (it names the number, and in
+  the compact variant it was the faintest text on the page), and its value is
+  `tabular-nums` so a stat strip lines up.
+- A recording that was **never registered** now reads "Not available" instead
+  of "--", matching the transcript and summary columns beside it. One row used
+  to make the same statement three different ways.
+- The Calls page's customer links use `HoverPrefetchLink`, like every other
+  list in the CRM.
+
+### 5. Performance — measured before touching anything
+
+Every statement against Neon from this machine costs the round trip, not the
+query (three runs, median): `SELECT 1` **410 ms**, `getAgentWithDevices`
+409 ms, `getAgentActivity` 290 ms, `listCallsForAgent` 344 ms, `listAgents`
+413 ms, `getAgentSummaries` 297 ms, `listDevices` 276 ms.
+
+Whole-page, production build, warm (three runs): `/agents` 1.08 / 0.83 / 0.85 s,
+`/agents/{Rahul}` 1.22 / 1.20 / 0.85 s, `/calls` 0.76 / 0.60 / 0.76 s.
+
+So the agent detail page is three round trips and essentially nothing else —
+which is what the previous pass already reduced it to (4 → 3) and covered with
+hover prefetch and a `loading` boundary. **No further change was made**: the
+only remaining lever is a fourth statement-merge across unrelated column sets,
+on the path that reports call data, for ~300 ms that a Vercel deployment (which
+sits beside the database, unlike this machine) does not pay in the first place.
+Optimising it here would be trading real fragility for a latency that is an
+artefact of where the measurement was taken.
+
+### 6. Verified and deliberately NOT changed
+
+- **The customer call-history table.** Read end to end and rendered against
+  real data: date/time, direction, outcome, duration, agent, device, and the
+  three pipeline states, with "Not available" where a stage genuinely has
+  nothing — never "Failed". Only the never-registered-recording wording and the
+  stale-outcome badge changed.
+- **Transcript and summary storage.** `POST /api/calls/{id}/transcript` and
+  `/summary` store against the call id in the path, `@unique` on `call_id`, and
+  both are re-exercised by the suite. Live data: 14 transcripts (12 with text),
+  12 summaries (11 with text), all against existing calls. Display unchanged —
+  "View" opens the stored text in place.
+- **The CRM ↔ Android contract.** Re-read `CallSessionTracker`,
+  `BackendRepository` and this repo's own routes. Still agreed, item by item;
+  the one change this pass (agent fallback) removes an Android requirement
+  rather than adding one, and `settings.agentId` still wins when set. No
+  Android file was touched (CLAUDE.md §1).
+- **Call idempotency, device routing, auto-registration, `lastSeenAt`** — all
+  correct as written; the suite's checks 15–17 still pass unchanged.
+- **`getAgentActivity`'s single `UNION ALL`**, the customers-list overview
+  query, `staleTimes`, `HoverPrefetchLink`, `CallActivityRefresher`'s backoff.
+- **The 35 stale ACCEPTED requests and the 12 unreported calls** — real
+  records, left exactly as they are. They are now *read* correctly instead of
+  being rewritten.
+- **The four unattributed calls** and the three inactive-but-idle agents.
+
+### 7. Tests and builds — actually executed
+
+- `npx tsc --noEmit` — clean. `npm run lint` — clean. `npm run build` —
+  succeeded, 28 routes (`/calls` is new).
+- `npx prisma validate` — valid. `npx prisma migrate status` — 7 migrations,
+  "Database schema is up to date". No migration was needed this pass.
+- **Integration suite: 87 checks, 0 failures**, against `npm run start` and the
+  real Neon database. Eight are new (section 18), all on agent attribution: a
+  call inherits its request's agent; a call inherits its reporting handset's
+  agent *over* the customer's assigned agent; a client-sent `agentId` is never
+  overridden; with none of the three the agent stays null; `PATCH` fills a
+  missing agent from the device; `PATCH` never overwrites an agent or device
+  already recorded.
+- **Every record the suite created was deleted afterwards** (2 customers, 13
+  calls, 4 requests, 2 devices), twice, and the database re-verified back to its
+  demo state each time: 26 calls, 22 attributed, 37 customers, 0 devices, 49
+  requests, 11 recordings, 14 transcripts, 12 summaries.
+- Pages fetched from the running production server and read: `/calls` at
+  `range=all`, `range=today` and `range=month`, `/customers`, a customer detail
+  page, `/agents`, and `/agents/{Rahul}`.
+
+### 8. Incomplete / still requiring verification
+
+- **No real-device test.** No Android device was connected. Everything about
+  `deviceId`, auto-registration and routing is still verified with synthetic
+  device ids only.
+- **Still not deployed.** Until it is, the phone keeps talking to the old
+  backend: `deviceId` and `clientCallId` are dropped there, no routing happens,
+  and the agent fallback added here does nothing in production. This is now the
+  single biggest gap for the demo.
+- **A duplicate pair exists in the real data from 2026-08-22 03:55** — the
+  dial-time record and the outcome record for one phone call became two rows,
+  because the idempotency work is undeployed and `client_call_id` was null on
+  both. Left in place (both are real reports of a real dial); it should not
+  recur once the CRM ships. Not an Android defect.
+- **No `Device` row yet**, so every call still reads "--" under Device and the
+  Agents page's Devices table is empty. Unchanged from the previous pass, and
+  still not inventable from here: the id lives on the phone. It registers
+  itself on first contact with the deployed CRM.
+- **`dharmendra`, `user1papa` and `Saurabh` are unassigned customers** even
+  though Rahul has called the first two. Assignment is what routes a CRM "Call"
+  request to a device, so assigning them to Rahul before the demo would be
+  worth doing — deliberately not done here without being asked.
+- **`answeredAt` still has no producer** — unchanged, still true from
+  2026-08-10.

@@ -59,9 +59,9 @@ export default async function CustomersPage({ searchParams }: PageProps) {
       // An open request (Android hasn't finished with it) describes the
       // current state; otherwise the last call's own outcome does.
       lifecycle: openRequest
-        ? callLifecycleState(openRequest.status, undefined, false)
+        ? callLifecycleState(openRequest.status, undefined, false, { requestAt: openRequest.requestedAt })
         : summary
-          ? callLifecycleState(null, summary.lastCallStatus, true)
+          ? callLifecycleState(null, summary.lastCallStatus, true, { callStartedAt: summary.lastCallAt })
           : "NONE",
     };
   });

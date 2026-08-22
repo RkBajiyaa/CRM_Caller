@@ -11,13 +11,18 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: var(--color-text-subtle);
+  /* Muted, not subtle: this is the label that says what the number *is*, and
+     at 10.5px uppercase in the compact variant it was the faintest text on the
+     page. */
+  color: var(--color-text-muted);
 }
 
 .value {
   font-size: 22px;
   font-weight: 650;
   color: var(--color-text);
+  /* Numbers line up column-to-column across a stat strip. */
+  font-variant-numeric: tabular-nums;
   margin-top: var(--space-1);
   overflow: hidden;
   text-overflow: ellipsis;

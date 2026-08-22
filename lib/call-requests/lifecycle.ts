@@ -56,13 +56,44 @@ export const CALL_LIFECYCLE_LABELS: Record<CallLifecycleState, string> = {
   UNKNOWN: "Outcome unknown",
 };
 
+/**
+ * How long a call with no reported outcome can still plausibly be happening.
+ *
+ * `Call.status` stays null from "the phone started dialing" until Android
+ * reports the result, and if that report never arrives -- the app was killed
+ * mid-call, the phone went offline and the retry never ran -- the row stays
+ * null forever. Reading that as "in progress" a week later is wrong twice
+ * over: it tells an operator a call is live when it is long over, and it makes
+ * the customer page poll the server for twenty minutes waiting for an outcome
+ * that is never coming.
+ *
+ * So "in progress" is bounded by the clock. An hour is deliberately generous
+ * -- far longer than any call this CRM has recorded, so a genuinely long call
+ * is never mislabelled -- and anything past it becomes "Outcome unknown",
+ * which is what the record actually says. Nothing is written or changed by
+ * this; it is how an existing null is *read*.
+ */
+export const CALL_IN_FLIGHT_WINDOW_MS = 60 * 60 * 1000;
+
 /** True while the CRM should expect this to change on its own shortly -- what the UI polls/refreshes on. */
 export function isCallLifecycleActive(state: CallLifecycleState): boolean {
   return state === "QUEUED" || state === "DIALING" || state === "IN_PROGRESS";
 }
 
-/** Maps a finished (or unfinished) `Call.status` on its own, with no request context. */
-export function callStatusToLifecycle(status: CallStatus | null | undefined): CallLifecycleState {
+/**
+ * Maps a finished (or unfinished) `Call.status` on its own, with no request
+ * context.
+ *
+ * `startedAt` is optional and only matters for the unfinished case: without it
+ * a null status still reads "In progress", exactly as it always did; with it,
+ * a call that started longer ago than CALL_IN_FLIGHT_WINDOW_MS reads "Outcome
+ * unknown" instead.
+ */
+export function callStatusToLifecycle(
+  status: CallStatus | null | undefined,
+  startedAt?: string | null,
+  now: number = Date.now()
+): CallLifecycleState {
   switch (status) {
     case "ANSWERED":
       return "CONNECTED";
@@ -72,9 +103,16 @@ export function callStatusToLifecycle(status: CallStatus | null | undefined): Ca
     case "FAILED":
       return "FAILED";
     default:
-      // Started, never finished -- the call is (or was) live.
-      return "IN_PROGRESS";
+      // Started, never finished. Still live if it could still be happening;
+      // otherwise an outcome that was never reported -- see the window above.
+      return isStale(startedAt, now) ? "UNKNOWN" : "IN_PROGRESS";
   }
+}
+
+function isStale(startedAt: string | null | undefined, now: number): boolean {
+  if (!startedAt) return false;
+  const started = Date.parse(startedAt);
+  return Number.isFinite(started) && now - started > CALL_IN_FLIGHT_WINDOW_MS;
 }
 
 /**
@@ -88,20 +126,40 @@ export function callStatusToLifecycle(status: CallStatus | null | undefined): Ca
 export function callLifecycleState(
   requestStatus: CallRequestStatus | null | undefined,
   callStatus: CallStatus | null | undefined,
-  hasCall: boolean
+  hasCall: boolean,
+  /**
+   * When these records last said anything, so a state that means "right now"
+   * can stop claiming it. Both fields are optional and omitting them keeps the
+   * original, clock-free behaviour exactly.
+   *
+   * - `callStartedAt` -- when the call began; see callStatusToLifecycle.
+   * - `requestAt` -- when the request was last heard about (its `updatedAt`,
+   *   or its `requestedAt` where that is all the caller has).
+   */
+  at: { callStartedAt?: string | null; requestAt?: string | null; now?: number } = {}
 ): CallLifecycleState {
+  const now = at.now ?? Date.now();
+
   if (hasCall) {
     // A real call exists: its own outcome is the truth, whatever the request
     // says -- except that an explicitly cancelled request is worth surfacing.
     if (requestStatus === "CANCELLED" && callStatus == null) return "CANCELLED";
-    return callStatusToLifecycle(callStatus);
+    return callStatusToLifecycle(callStatus, at.callStartedAt, now);
   }
 
   switch (requestStatus) {
     case "PENDING":
+      // Still genuinely queued however old it is: Android is handed every
+      // PENDING request the next time it polls, so this one has not expired,
+      // it is waiting for a phone that has not asked yet.
       return "QUEUED";
     case "ACCEPTED":
-      return "DIALING";
+      // Android took this request and then never came back with a call. Past
+      // the window that is not "dialing right now", it is a dial whose result
+      // was never reported -- which is what the CRM's 35 long-accepted
+      // requests actually are, and why the customers list used to show most of
+      // the directory as permanently "Dialing".
+      return isStale(at.requestAt, now) ? "UNKNOWN" : "DIALING";
     case "CANCELLED":
       return "CANCELLED";
     case "FAILED":

@@ -11,8 +11,26 @@ export const CALL_STATUSES: CallStatus[] = ["ANSWERED", "MISSED", "REJECTED", "F
 export interface Call {
   id: string;
   customerId: string;
+  /**
+   * The customer's current name, resolved by a join for display -- never a
+   * stored snapshot, so a renamed customer reads correctly in every call that
+   * was ever made to them. `customerId` remains the relationship (CLAUDE.md
+   * rule #1); this is only what to print.
+   */
+  customerName: string | null;
   agentId: string | null;
   agentName: string | null;
+  /**
+   * The handset that reported this call, and its CRM label.
+   *
+   * Null means the reporting client did not say which phone it was -- which
+   * is the honest answer for every call recorded before devices existed, and
+   * for any client that doesn't send `deviceId`. Never guessed from the agent:
+   * an agent can carry more than one phone, and inventing the link would make
+   * an unverified guess look like a measurement.
+   */
+  deviceId: string | null;
+  deviceLabel: string | null;
   phoneNumber: string;
   direction: CallDirection;
   /** null = started, not yet finished (see prisma/schema.prisma). */
@@ -66,6 +84,12 @@ export interface Call {
   callRequestId: string | null;
   callRequestStatus: CallRequestStatus | null;
   callRequestRequestedAt: string | null;
+  /**
+   * The reporting client's own idempotency key for this call, if it sent one.
+   * Read-only here -- it exists so a retry finds this row instead of creating
+   * a second one (see StartCallInput.clientCallId).
+   */
+  clientCallId: string | null;
 }
 
 /**
@@ -97,6 +121,26 @@ export interface StartCallInput {
   agentId?: string | null;
   startedAt?: string;
   callRequestId?: string | null;
+  /**
+   * Which handset is reporting. Optional and additive; an unknown id is
+   * registered on the spot rather than rejected, because a call must never be
+   * lost for want of a device row (see lib/devices/service.ts).
+   */
+  deviceId?: string | null;
+  /**
+   * The client's own stable identity for this call -- an idempotency key.
+   *
+   * Send the same value on every retry of the same call and this endpoint
+   * returns the call it already created instead of creating another. That is
+   * what makes an Android retry, a network retry, an app restart, an offline
+   * queue flush and a manual "Send to CRM" all safe to repeat. Must be unique
+   * across every device, so namespace it: `<deviceId>:<callLogRowId>`.
+   *
+   * Optional. A client that doesn't send one keeps exactly the behaviour it
+   * has today, and is still protected on the CRM-initiated path by
+   * `callRequestId` (see lib/calls/service.ts).
+   */
+  clientCallId?: string | null;
 }
 
 /**
@@ -117,6 +161,14 @@ export interface UpdateCallInput {
   durationSeconds?: number;
   failureReason?: string | null;
   agentId?: string | null;
+  /**
+   * Which handset reported the outcome. Additive, and for the client that only
+   * learns (or only bothers to send) its device id at finish time. It fills in
+   * a call's device when the call doesn't have one yet and otherwise leaves it
+   * alone -- a call's device is a fact about what already happened, not
+   * something a later request should be able to rewrite.
+   */
+  deviceId?: string | null;
 }
 
 export interface CustomerCallStats {

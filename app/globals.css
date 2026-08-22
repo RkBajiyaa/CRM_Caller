@@ -23,8 +23,15 @@
   --color-border: #e5e7eb;
   --color-border-strong: #d1d5db;
   --color-text: #111827;
-  --color-text-muted: #6b7280;
-  --color-text-subtle: #9ca3af;
+  /* Secondary and tertiary text, darkened from #6b7280/#9ca3af (2026-08-22).
+     The old subtle grey cleared 2.5:1 against the surface -- below WCAG's 4.5:1
+     for body text and visibly faded on a projector, which is what this CRM gets
+     demonstrated on. These are the same two steps of hierarchy, one stop darker
+     each: muted is now gray-600 (~7.5:1) and subtle is the old muted value
+     (~4.8:1). Nothing else in the palette moved, so the layout, the borders and
+     the status colours are unchanged. */
+  --color-text-muted: #4b5563;
+  --color-text-subtle: #6b7280;
 
   /* Status */
   --color-success: #15803d;

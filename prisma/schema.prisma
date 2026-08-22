@@ -107,9 +107,15 @@ model Agent {
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
-  assignedCustomers Customer[] @relation("CustomerAssignedAgent")
+  assignedCustomers Customer[]    @relation("CustomerAssignedAgent")
   calls             Call[]
   actions           Action[]
+  /// The phones this agent works from. An agent normally has exactly one
+  /// (Agent A -> Device A), but the relation is one-to-many so a replacement
+  /// handset can be added before the old one is retired without losing the
+  /// old device's call history.
+  devices           Device[]
+  callRequests      CallRequest[]
 
   @@map("agents")
 }
@@ -163,8 +169,8 @@ model Customer {
   /// Real relation to Agent, added in V1 (CRM_ARCHITECTURE.md Phase 3) so
   /// assignment can eventually drive permissions/queries ("my customers"),
   /// not just display text. Nullable: a customer can be unassigned.
-  assignedAgentId String? @map("assigned_agent_id")
-  assignedAgentRef Agent? @relation("CustomerAssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  assignedAgentId  String? @map("assigned_agent_id")
+  assignedAgentRef Agent?  @relation("CustomerAssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
 
   /// Application/account creation date -- distinct from crmEntryCreatedAt.
   /// Optional: may be unknown at CRM-entry time.
@@ -207,8 +213,8 @@ model Customer {
 /// below is a point-in-time snapshot of what was dialed/received, for
 /// display and audit, not a relationship.
 model Call {
-  id         String @id @default(uuid()) @map("call_id")
-  customerId String @map("customer_id")
+  id         String   @id @default(uuid()) @map("call_id")
+  customerId String   @map("customer_id")
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   /// The agent who actually made/took this call -- distinct from
@@ -227,7 +233,7 @@ model Call {
   /// "started, not yet finished," not "unknown forever."
   status CallStatus?
 
-  startedAt       DateTime  @map("started_at")
+  startedAt DateTime @map("started_at")
 
   /// When the call was actually picked up, if it ever was. Distinct from
   /// `startedAt` (when dialling began) and from `endedAt`: the gap between
@@ -239,6 +245,31 @@ model Call {
   answeredAt      DateTime? @map("answered_at")
   endedAt         DateTime? @map("ended_at")
   durationSeconds Int       @default(0) @map("duration_seconds")
+
+  /// Which physical phone reported this call. Nullable: every call already in
+  /// the database predates devices, and a client that doesn't send a
+  /// `deviceId` stays valid -- "we don't know which handset" is the honest
+  /// answer, never a guessed one. Set to NULL rather than deleted if the
+  /// device row is ever removed: the call itself is the record of what
+  /// happened and must outlive the hardware.
+  deviceId String? @map("device_id")
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  /// The reporting client's own stable identity for this call -- an
+  /// idempotency key, not a second primary key.
+  ///
+  /// It exists for exactly one job: a retry (network failure, app restart,
+  /// offline queue flush, manual "Send to CRM") must update the call it
+  /// already created instead of creating a second one. `POST /api/calls` looks
+  /// this up first and returns the existing call unchanged when it matches,
+  /// so retrying is free and safe however many times it happens.
+  ///
+  /// Unique across the whole table, so the reporting client must namespace it
+  /// per device (`<deviceId>:<callLogRowId>` is the intended shape). Nullable
+  /// and optional: a client that doesn't send one keeps the exact behaviour it
+  /// has always had, and is protected instead by the `callRequestId` path
+  /// (see lib/calls/service.ts).
+  clientCallId String? @unique @map("client_call_id")
 
   /// Why a call did not connect, in the reporting client's own words
   /// ("Call rejected by the other side", "No network", a carrier cause code).
@@ -266,7 +297,13 @@ model Call {
   /// prefix of this, so this index also serves everything the old
   /// single-column one did -- it replaces it rather than adding to it.
   @@index([customerId, startedAt])
-  @@index([agentId])
+  /// Composite for the same reason as `customerId, startedAt` above: every
+  /// agent-activity read is "this agent's calls in this date window"
+  /// (lib/agents/activity.ts), never "this agent's calls in no particular
+  /// order". `agentId` alone is a prefix of this, so this replaces the old
+  /// single-column index rather than adding to it.
+  @@index([agentId, startedAt])
+  @@index([deviceId, startedAt])
   @@index([startedAt])
   @@map("calls")
 }
@@ -295,6 +332,27 @@ model CallRequest {
 
   status CallRequestStatus @default(PENDING)
 
+  /// Who this request is for, and which handset should place it.
+  ///
+  /// This is the routing information the CRM -> Android hop was missing: with
+  /// three agents each carrying their own phone, a request meant for Device A
+  /// must not be dialed by Device B, and a phone number on its own cannot say
+  /// which. `deviceId` is the field Android filters its poll on
+  /// (`GET /api/call-requests?deviceId=...`); `agentId` records who the
+  /// request was raised for and is what agent-level reporting reads.
+  ///
+  /// Both nullable, and deliberately so. A request with no `deviceId` is
+  /// *unrouted*, not broken: it is offered to every polling device, which is
+  /// exactly the behaviour every request had before this column existed, so
+  /// nothing already queued and no client that doesn't send the field is
+  /// affected. The CRM fills both in automatically from the customer's
+  /// assigned agent when it can (lib/call-requests/service.ts).
+  agentId String? @map("agent_id")
+  agent   Agent?  @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  deviceId String? @map("device_id")
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
   /// Set once Android has created the real Call for this request (via
   /// POST /api/calls's optional `callRequestId`). Unique: one call
   /// request is fulfilled by at most one call.
@@ -310,7 +368,75 @@ model CallRequest {
   /// `WHERE status = 'PENDING' ORDER BY requested_at ASC`. `status` alone is
   /// a prefix of this, so this replaces the old single-column index.
   @@index([status, requestedAt])
+  /// The routed form of that same poll: `WHERE (device_id = $1 OR device_id IS
+  /// NULL) AND status = 'PENDING' ORDER BY requested_at ASC`. The unrouted
+  /// half is served by the index above; this one serves the device's own.
+  @@index([deviceId, status, requestedAt])
+  @@index([agentId])
   @@map("call_requests")
+}
+
+// ============================================================================
+// Devices -- the physical phones Conbun Call runs on
+// ============================================================================
+
+/// One row per handset running the Conbun Call Android app.
+///
+/// Exists so the CRM can answer "which phone should place this call, and which
+/// phone reported this one" -- the Agent + Device + Customer + Call
+/// relationship the call-intelligence sprint requires. Nothing about it is
+/// hard-coded to the three devices in the current test setup; adding a fourth
+/// employee is adding a row.
+///
+/// **`id` is supplied by the device, not generated here**, which is the one
+/// deliberate departure from this schema's usual "the backend generates
+/// identity" rule -- and it is not really a departure: for a phone, the phone
+/// *is* the identity. Conbun Call already generates and persists a stable
+/// `deviceId` of the form `CONBUN-<8 hex>` in its own settings
+/// (`SettingsRepository.ensureDeviceIdGenerated`), it survives app restarts,
+/// and it is the value the phone will send on every request. Minting a second
+/// CRM-side id would mean maintaining a mapping table whose only purpose is to
+/// translate one stable string into another. Note the contrast with
+/// `Customer.phoneNumber` (CLAUDE.md rule #1): a phone *number* is a mutable
+/// attribute of a person, while a device id is the device's own name for
+/// itself.
+///
+/// Unknown device ids are registered automatically on first contact rather
+/// than rejected (see lib/devices/service.ts). A call must never be lost
+/// because the CRM had not been told about a handset yet; an auto-registered
+/// device simply arrives unassigned, and an admin links it to an agent in the
+/// CRM.
+model Device {
+  id String @id @map("device_id")
+
+  /// Human-readable name for the CRM's own lists ("Priya's Pixel"). Optional
+  /// -- an auto-registered device has none until someone names it.
+  label String? @map("label")
+
+  /// The agent this handset belongs to. Nullable: a device that has just
+  /// registered itself is genuinely unassigned, which is different from being
+  /// assigned to nobody in particular.
+  agentId String? @map("agent_id")
+  agent   Agent?  @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  isActive Boolean @default(true) @map("is_active")
+
+  /// Last time this device contacted the backend at all -- refreshed (at most
+  /// once a minute, see lib/call-requests/service.ts) by its own call-request
+  /// poll. This is what lets the CRM distinguish "Android hasn't sent this
+  /// yet" from "this failed": a device that stopped polling an hour ago is
+  /// offline, and its silence is not a failure. Null means it has never been
+  /// heard from.
+  lastSeenAt DateTime? @map("last_seen_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  callRequests CallRequest[]
+  calls        Call[]
+
+  @@index([agentId])
+  @@map("devices")
 }
 
 // ============================================================================
@@ -380,12 +506,12 @@ model AiSummary {
   callId String @unique @map("call_id")
   call   Call   @relation(fields: [callId], references: [id], onDelete: Cascade)
 
-  summaryText       String? @map("summary_text")
+  summaryText       String?  @map("summary_text")
   keyPoints         String[] @map("key_points")
-  customerIntent    String? @map("customer_intent")
+  customerIntent    String?  @map("customer_intent")
   sentiment         String?
-  recommendedAction String? @map("recommended_action")
-  followUpRequired  Boolean @default(false) @map("follow_up_required")
+  recommendedAction String?  @map("recommended_action")
+  followUpRequired  Boolean  @default(false) @map("follow_up_required")
 
   processingStatus ProcessingStatus @default(PENDING) @map("processing_status")
   modelProvider    String?          @map("model_provider")
@@ -415,10 +541,10 @@ model Action {
   assignedAgentId String? @map("assigned_agent_id")
   assignedAgent   Agent?  @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
 
-  type   ActionType   @default(FOLLOW_UP)
-  notes  String?
-  dueDate DateTime?   @map("due_date")
-  status ActionStatus @default(PENDING)
+  type    ActionType   @default(FOLLOW_UP)
+  notes   String?
+  dueDate DateTime?    @map("due_date")
+  status  ActionStatus @default(PENDING)
 
   createdAt   DateTime  @default(now()) @map("created_at")
   completedAt DateTime? @map("completed_at")

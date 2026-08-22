@@ -52,6 +52,8 @@ export const PIPELINE_WATCH_WINDOW_MS = 15 * 60 * 1000;
 export interface CallPulse {
   id: string;
   updatedAt: string;
+  /** When the call started -- what tells a call still in flight from one whose outcome was never reported (see lifecycle.ts). */
+  startedAt: string;
   status: CallStatus | null;
   hasRecording: boolean;
   recordingStatus: string | null;
@@ -79,6 +81,7 @@ export function callToPulse(call: Call): CallPulse {
   return {
     id: call.id,
     updatedAt: call.updatedAt,
+    startedAt: call.startedAt,
     status: call.status,
     hasRecording: call.hasRecording,
     recordingStatus: call.recordingStatus,
@@ -157,8 +160,15 @@ export function callActivityPulse(
   // it produced, not merely the newest unrelated call (lifecycle.ts).
   const requestCall = latestRequest?.callId ? calls.find((c) => c.id === latestRequest.callId) : undefined;
   const lifecycle = latestRequest
-    ? callLifecycleState(latestRequest.status, requestCall?.status ?? null, Boolean(latestRequest.callId))
-    : callLifecycleState(null, latestCall?.status ?? null, Boolean(latestCall));
+    ? callLifecycleState(latestRequest.status, requestCall?.status ?? null, Boolean(latestRequest.callId), {
+        callStartedAt: requestCall?.startedAt ?? null,
+        requestAt: latestRequest.updatedAt,
+        now,
+      })
+    : callLifecycleState(null, latestCall?.status ?? null, Boolean(latestCall), {
+        callStartedAt: latestCall?.startedAt ?? null,
+        now,
+      });
 
   // A call is in flight -- keep watching, the outcome is coming.
   let active = isCallLifecycleActive(lifecycle);

@@ -6,16 +6,18 @@ import styles from "./Sidebar.module.css";
 
 const NAV_ITEMS = [
   { label: "Customers", href: "/customers" as const },
+  { label: "Calls", href: "/calls" as const },
   { label: "Agents", href: "/agents" as const },
 ];
 
 /**
  * Primary navigation. No authentication in this build (see CHANGELOG.md)
- * -- both real sections are always shown, there's no login/role to gate
- * them on. "Calls"/"Reports" remain disabled placeholders -- no
- * standalone pages for those yet, call data lives inside the customer
- * detail page. Client Component so `usePathname()` can highlight the
- * current section.
+ * -- every real section is always shown, there's no login/role to gate
+ * them on. "Calls" is a real section now (team-wide call activity over a
+ * date window); "Reports" stays a disabled placeholder, because agent
+ * reporting lives inside the Agents section and there is no separate
+ * reporting page to link to yet. Client Component so `usePathname()` can
+ * highlight the current section.
  */
 export function Sidebar() {
   const pathname = usePathname();
@@ -39,10 +41,6 @@ export function Sidebar() {
             </Link>
           );
         })}
-        <span className={styles.navItemDisabled} aria-disabled="true">
-          Calls
-          <span className={styles.soon}>Soon</span>
-        </span>
         <span className={styles.navItemDisabled} aria-disabled="true">
           Reports
           <span className={styles.soon}>Soon</span>

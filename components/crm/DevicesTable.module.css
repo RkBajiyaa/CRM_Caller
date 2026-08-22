@@ -3,63 +3,23 @@
   width: 100%;
 }
 
-.colName {
-  width: 26%;
+.colId {
+  width: 22%;
 }
-.colRole {
-  width: 9%;
+.colLabel {
+  width: 22%;
 }
-.colDevices {
-  width: 8%;
+.colAgent {
+  width: 22%;
 }
-.colNum {
-  width: 8%;
-  text-align: right;
-}
-.colTalk {
-  width: 11%;
+.colSeen {
+  width: 18%;
 }
 .colStatus {
   width: 10%;
 }
 .colActions {
-  width: 12%;
-}
-
-.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.nameText {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.email {
-  font-size: 11.5px;
-  font-weight: 400;
-  color: var(--color-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-a.nameCell {
-  color: inherit;
-  text-decoration: none;
-}
-
-a.nameCell:hover .nameText {
-  color: var(--color-accent, currentColor);
-}
-
-.footnote {
-  padding: 0 var(--space-4) var(--space-4);
-  font-size: 12px;
-  color: var(--color-text-subtle);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 10%;
 }
 
 .table th {
@@ -87,11 +47,9 @@ a.nameCell:hover .nameText {
   border-bottom: none;
 }
 
-.nameCell {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  font-weight: 600;
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
 }
 
 .muted {
@@ -110,6 +68,24 @@ a.nameCell:hover .nameText {
   clip: rect(0 0 0 0);
 }
 
+.inlineInput {
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  font-size: 13.5px;
+  color: inherit;
+}
+
+.inlineInput:hover:not(:disabled),
+.inlineInput:focus {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+}
+
 .footer {
   padding: var(--space-4);
 }
@@ -123,12 +99,18 @@ a.nameCell:hover .nameText {
 
 .input,
 .select {
-  height: 36px;
+  height: 34px;
   padding: 0 var(--space-3);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
   font-size: 13px;
+  color: var(--color-text);
+  max-width: 100%;
+}
+
+.select {
+  width: 100%;
 }
 
 .error {

@@ -121,6 +121,18 @@ export default async function CustomerDetailPage({ params }: PageProps) {
                   Requested {formatDateTime(latestRequest.requestedAt)} &middot; queue {latestRequest.status}
                   {latestRequest.callId ? " · linked to a call" : ""}
                 </span>
+                {/* Where this request was aimed. An unrouted request is offered
+                    to every polling device, which is what happens when the
+                    customer has no assigned agent or that agent has no
+                    registered phone -- worth saying plainly rather than
+                    leaving blank. */}
+                <span className={styles.requestMeta}>
+                  {latestRequest.deviceId
+                    ? `To ${latestRequest.deviceLabel ?? latestRequest.deviceId}${
+                        latestRequest.agentName ? ` (${latestRequest.agentName})` : ""
+                      }`
+                    : "Not routed to a specific device -- any Conbun Call phone can pick it up"}
+                </span>
               </div>
             )}
           </div>

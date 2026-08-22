@@ -1,34 +1,37 @@
+/* Deliberately mirrors CallHistoryTable.module.css's visual language -- a
+   cross-customer call list and a customer's own call list should read as the
+   same kind of table, because they are. Only the column widths differ
+   (customer/agent/device in place of agent and follow-up). */
+
 .table {
   table-layout: fixed;
   width: 100%;
 }
 
 .colWhen {
-  width: 13%;
+  width: 14%;
+}
+.colCustomer {
+  width: 14%;
+}
+/* Only rendered on the team-wide Calls page -- see CallsTable's `showAgent`. */
+.colAgent {
+  width: 10%;
+}
+.colDevice {
+  width: 12%;
 }
 .colDirection {
-  width: 4%;
+  width: 5%;
 }
 .colStatus {
   width: 11%;
 }
 .colDuration {
-  width: 7%;
-}
-.colAgent {
-  width: 11%;
-}
-/* Added alongside the Agent column: a call belongs to an agent *and* a
-   handset, and with several phones in the field the two are separate
-   questions. */
-.colDevice {
-  width: 10%;
+  width: 8%;
 }
 .colBadge {
-  width: 9%;
-}
-.colFollowUp {
-  width: 9%;
+  width: 10%;
 }
 .colExpand {
   width: 40px;
@@ -70,6 +73,17 @@
 .mono {
   font-family: var(--font-mono);
   font-size: 11.5px;
+  color: var(--color-text-muted);
+}
+
+.customerLink {
+  color: var(--color-accent-hover);
+  text-decoration: none;
+  font-weight: 550;
+}
+
+.customerLink:hover {
+  text-decoration: underline;
 }
 
 .srOnly {
@@ -83,8 +97,6 @@
   white-space: nowrap;
   border: 0;
 }
-
-/* ---------------------------------------------------------------- expander */
 
 .expandButton {
   display: inline-flex;
@@ -104,8 +116,6 @@
   color: var(--color-text);
 }
 
-/* Shown in the Transcript/Summary columns instead of a badge when there is
-   stored content to read. Reads as an action, not a status. */
 .viewButton {
   display: inline-flex;
   align-items: center;
@@ -135,8 +145,6 @@
   transform: rotate(90deg);
 }
 
-/* A call row and its open detail panel read as one unit -- drop the divider
-   between them, and mark the row itself as the selected one. */
 .rowExpanded td {
   border-bottom: none;
   background: var(--color-bg);
@@ -159,62 +167,8 @@
   background: var(--color-surface);
 }
 
-/* ------------------------------------------------------------- fact blocks */
-
-.detailFacts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: var(--space-3) var(--space-4);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.fact {
-  min-width: 0;
-}
-
-.factLabel {
-  font-size: 10.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--color-text-subtle);
-}
-
-.factValue {
-  font-size: 13px;
-  color: var(--color-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-top: 1px;
-}
-
-.factLink {
-  color: var(--color-accent-hover);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------------------------------------------------------------- panels */
-
-.detailPanels {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--space-3);
-}
-
 .panel {
   min-width: 0;
-}
-
-/* The panel a "View" click jumped to -- marks where the eye should land in a
-   detail row that has several sections. */
-/* `outline` rather than a border/shadow so marking a panel never shifts the
-   layout of the row it is in. */
-.panelFocused {
-  outline: 2px solid var(--color-accent-soft);
-  outline-offset: var(--space-2);
-  border-radius: var(--radius-sm);
 }
 
 .panelHeader {
@@ -232,40 +186,11 @@
   color: var(--color-text-muted);
 }
 
-.miniFacts {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.miniFact {
-  display: grid;
-  grid-template-columns: minmax(84px, auto) 1fr;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.miniFactLabel {
-  font-size: 12px;
-  color: var(--color-text-subtle);
-}
-
-.miniFactValue {
-  font-size: 12.5px;
-  color: var(--color-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
 .empty {
   font-size: 12.5px;
   color: var(--color-text-muted);
   line-height: 1.5;
 }
-
-/* --------------------------------------------------- transcript / summary */
 
 .longText {
   padding: var(--space-3);
@@ -275,8 +200,6 @@
   font-size: 12.5px;
   line-height: 1.55;
   color: var(--color-text);
-  /* Transcripts arrive as one long block from the Whisper pipeline -- keep
-     line breaks if there are any, wrap long lines either way. */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 320px;
@@ -295,10 +218,16 @@
   list-style: disc;
 }
 
-.keyPoints + .miniFacts {
-  margin-top: var(--space-3);
+.detailFooter {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
 }
 
-.longText + .miniFacts {
-  margin-top: var(--space-3);
+/* A fact the CRM was never given, printed as such rather than as an em dash --
+   "Not recorded" is a different statement from an empty cell. */
+.unknown {
+  color: var(--color-text-muted);
+  font-style: italic;
 }

@@ -34,7 +34,14 @@ const PIPELINE_BADGE: Record<string, { label: string; tone: BadgeTone }> = {
   PENDING: { label: "Waiting", tone: "neutral" },
   FAILED: { label: "Failed", tone: "danger" },
 };
-const NOT_STARTED: { label: string; tone: BadgeTone } = { label: "--", tone: "neutral" };
+/**
+ * No recording row exists for this call at all -- the stage never started.
+ * Reads the same as the transcript and summary columns beside it, because it
+ * is the same statement: the CRM has nothing for this stage. It used to print
+ * "--", which left one row saying "--" and "Not available" about three stages
+ * in identical situations.
+ */
+const NOT_REGISTERED: { label: string; tone: BadgeTone } = { label: "Not available", tone: "neutral" };
 const NOT_AVAILABLE: { label: string; tone: BadgeTone } = { label: "Not available", tone: "neutral" };
 
 const ACTION_STATUS_LABEL: Record<Action["status"], string> = {
@@ -62,15 +69,56 @@ const ACTION_TYPE_LABEL: Record<Action["type"], string> = {
  * that has nothing to show. Only the genuinely in-flight states still say so,
  * because there really is something to wait for there.
  *
- * Recording is deliberately not routed through here: it keeps its existing
- * PIPELINE_BADGE behaviour untouched, "Failed" included -- a recording is a
- * file that either got captured or didn't, and this pass was scoped to the
- * transcript and summary columns only.
+ * Recording has its own rule, just below -- it is a file rather than derived
+ * text, so it keeps "Failed" where a capture really did fail.
  */
 function contentBadge(status: string | null, hasContent: boolean) {
   if (hasContent) return PIPELINE_BADGE.DONE;
   if (status === "PENDING" || status === "PROCESSING") return PIPELINE_BADGE[status];
   return NOT_AVAILABLE;
+}
+
+/**
+ * Recording state, as the agent should read it.
+ *
+ * Recording is genuinely different from transcript and summary -- a recording
+ * is a file that either got captured or didn't, so a real capture failure on a
+ * call that *was* answered still says "Failed", because that one is worth
+ * chasing.
+ *
+ * The one case that isn't: a call nobody picked up. Conbun Call still runs its
+ * recording discovery for a missed, rejected or failed call, finds nothing --
+ * because there was nothing to find -- and registers the recording as FAILED
+ * with no `storageKey`. The CRM then printed "Failed" against a missed call,
+ * which reads as a broken recorder when the truth is that silence was the
+ * correct outcome. With no file stored and no call answered, that is "Not
+ * available".
+ *
+ * Deliberately narrow: it takes *both* conditions. An answered call whose
+ * recording failed keeps its "Failed", and a recording that stored a file
+ * keeps whatever its pipeline reported.
+ */
+function recordingBadge(call: Call) {
+  const status = call.recordingStatus ?? "PENDING";
+  if (status === "FAILED" && !call.recordingStorageKey && call.status !== "ANSWERED") {
+    return NOT_AVAILABLE;
+  }
+  return PIPELINE_BADGE[status] ?? PIPELINE_BADGE.PENDING;
+}
+
+/**
+ * The outcome cell for a call Android never finished.
+ *
+ * Amber while the call could still be happening; plain neutral once it can't,
+ * because "Outcome unknown" is a record of something that did not arrive, not
+ * a warning about something in flight. See CALL_IN_FLIGHT_WINDOW_MS.
+ */
+function unfinishedCallBadge(startedAt: string): { label: string; tone: BadgeTone } {
+  const state = callStatusToLifecycle(null, startedAt);
+  return {
+    label: CALL_LIFECYCLE_LABELS[state],
+    tone: state === "IN_PROGRESS" ? "warning" : "neutral",
+  };
 }
 
 /** Which of the expanded row's long-form panels a "View" click asked for. */
@@ -142,6 +190,7 @@ export function CallHistoryTable({
           <th className={styles.colStatus}>Outcome</th>
           <th className={styles.colDuration}>Duration</th>
           <th className={styles.colAgent}>Agent</th>
+          <th className={styles.colDevice}>Device</th>
           <th className={styles.colBadge}>Recording</th>
           <th className={styles.colBadge}>Transcript</th>
           <th className={styles.colBadge}>Summary</th>
@@ -158,9 +207,7 @@ export function CallHistoryTable({
           const hasSummary = Boolean(call.aiSummaryText && call.aiSummaryText.trim());
           const transcriptBadge = contentBadge(call.transcriptStatus, hasTranscriptText);
           const summaryBadge = contentBadge(call.aiSummaryStatus, hasSummary);
-          const recordingBadge = call.hasRecording
-            ? (PIPELINE_BADGE[call.recordingStatus ?? "PENDING"] ?? PIPELINE_BADGE.PENDING)
-            : NOT_STARTED;
+          const recording = call.hasRecording ? recordingBadge(call) : NOT_REGISTERED;
           // Fall back to the recording's own reported duration only for a call
           // that was actually answered -- it's what the audio file contains,
           // which can differ slightly from the call-log duration Android
@@ -183,13 +230,22 @@ export function CallHistoryTable({
                   {call.status ? (
                     <Badge tone={CALL_STATUS_BADGE[call.status].tone}>{CALL_STATUS_BADGE[call.status].label}</Badge>
                   ) : (
-                    <Badge tone="warning">{CALL_LIFECYCLE_LABELS[callStatusToLifecycle(null)]}</Badge>
+                    <Badge tone={unfinishedCallBadge(call.startedAt).tone}>
+                      {unfinishedCallBadge(call.startedAt).label}
+                    </Badge>
                   )}
                 </td>
                 <td className={styles.muted}>{durationSeconds > 0 ? formatDuration(durationSeconds) : "--"}</td>
                 <td className={styles.muted}>{call.agentName ?? "Unassigned"}</td>
+                {/* Which handset reported this call. "--" means the reporting
+                    client didn't say -- true of every call recorded before
+                    devices existed -- and is never filled in from the agent,
+                    who may carry more than one phone. */}
+                <td className={styles.mono} title={call.deviceId ?? undefined}>
+                  {call.deviceLabel ?? call.deviceId ?? "--"}
+                </td>
                 <td>
-                  <Badge tone={recordingBadge.tone}>{call.hasRecording ? recordingBadge.label : "--"}</Badge>
+                  <Badge tone={recording.tone}>{recording.label}</Badge>
                 </td>
                 {/* Content that exists offers the way to read it, in place of
                     a badge that only said it existed. Nothing is fetched or
@@ -237,7 +293,7 @@ export function CallHistoryTable({
 
               {expanded && (
                 <tr className={styles.detailRow} id={`call-detail-${call.id}`}>
-                  <td colSpan={10}>
+                  <td colSpan={11}>
                     <div className={styles.detail}>
                       <dl className={styles.detailFacts}>
                         <Fact label="Customer" value={customerName} />
@@ -247,11 +303,16 @@ export function CallHistoryTable({
                           value={
                             call.status
                               ? CALL_STATUS_BADGE[call.status].label
-                              : CALL_LIFECYCLE_LABELS[callStatusToLifecycle(null)]
+                              : unfinishedCallBadge(call.startedAt).label
                           }
                         />
                         <Fact label="Direction" value={call.direction === "OUTGOING" ? "Outgoing" : "Incoming"} />
                         <Fact label="Agent" value={call.agentName ?? "Unassigned"} />
+                        <Fact
+                          label="Device"
+                          value={call.deviceLabel ?? call.deviceId ?? "Not reported"}
+                          mono={!call.deviceLabel && Boolean(call.deviceId)}
+                        />
                         <Fact label="Started" value={formatDateTime(call.startedAt)} />
                         {/* Only rendered when the reporting client actually sent
                             it -- an absent answer time is never faked from the
@@ -289,7 +350,10 @@ export function CallHistoryTable({
                         <Panel title="Recording">
                           {call.hasRecording ? (
                             <dl className={styles.miniFacts}>
-                              <MiniFact label="State" value={call.recordingStatus ?? "Registered"} />
+                              {/* The same wording as the column, so opening a
+                                  row never contradicts the badge that was just
+                                  clicked -- see recordingBadge(). */}
+                              <MiniFact label="State" value={recording.label} />
                               <MiniFact
                                 label="Length"
                                 value={
